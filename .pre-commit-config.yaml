@@ -1,0 +1,26 @@
+# .pre-commit-config.yaml:
+# This file configures the 'pre-commit' framework, defining a set of automated
+# checks (hooks) that run against your code before each Git commit. These hooks
+# help maintain code quality, consistency, and identify potential issues early
+# in the development cycle by enforcing coding standards, formatting rules,
+# and other validations.
+#
+# Each 'repo' entry specifies a Git repository containing hooks, along with
+# its revision and the specific 'id' of the hooks to be used from that repository.
+# Common uses include linting, code formatting, syntax checks, and secret detection.
+
+# Hook for clearing Jupyter notebook outputs before committing
+# This helps keep the repository clean and minimize risk of committing sensitive data.
+  repos:
+  - repo: https://github.com/srstevenson/nb-clean
+    rev: 4.0.1  # pin latest
+    hooks:
+      - id: nb-clean
+        files: \.ipynb$
+  # - repo: https://github.com/astral-sh/ruff-pre-commit
+  #   rev: v0.12.9
+  #   hooks:
+  #     - id: ruff
+  #       args: ["--fix"]   # no exclude, no --config
+
+  #     - id: ruff-format
