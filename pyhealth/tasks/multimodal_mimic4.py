@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union, Tuple, ClassVar
+import polars as pl
 
 from pyhealth.tasks.base_task import BaseTask
 
@@ -188,14 +189,14 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
             "discharge_note_times": (
                 "tuple_time_text",
                 {
-                    "tokenizer_name": "bert-base-uncased",
+                    "tokenizer_model": "bert-base-uncased",
                     "type_tag": "note",
                 },
             ),
             "radiology_note_times": (
                 "tuple_time_text",
                 {
-                    "tokenizer_name": "bert-base-uncased",
+                    "tokenizer_model": "bert-base-uncased",
                     "type_tag": "note",
                 },
             ),
