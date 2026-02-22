@@ -4,7 +4,27 @@ from typing import Any, Dict, List, Optional, Union, Tuple
 from pyhealth.tasks.base_task import BaseTask
 
 class ClinicalNotesMIMIC4(BaseTask):
-    
+    """Task for clinical notes-based mortality prediction using MIMIC-IV.
+
+    Predicts patient-level mortality using discharge summaries and radiology
+    notes paired with their timestamps. Notes are processed by
+    ``TupleTimeTextProcessor`` to produce token IDs and
+    time offsets relative to each admission.
+
+    Examples:
+        >>> from pyhealth.datasets import MIMIC4Dataset
+        >>> from pyhealth.tasks.multimodal_mimic4 import ClinicalNotesMIMIC4
+        >>> dataset = MIMIC4Dataset(
+        ...     ehr_root="/path/to/mimic-iv/2.2",
+        ...     note_root="/path/to/mimic-iv-note/2.2",
+        ...     ehr_tables=["diagnoses_icd", "procedures_icd",
+        ...                 "prescriptions", "labevents"],
+        ...     note_tables=["discharge", "radiology"],
+        ... )
+        >>> task = ClinicalNotesMIMIC4()
+        >>> samples = dataset.set_task(task)
+    """
+
     task_name: str = "ClinicalNotesMIMIC4"
     TOKEN_REPRESENTING_MISSING_TEXT = "<missing>"
     TOKEN_REPRESENTING_MISSING_FLOAT = float("nan")
@@ -15,14 +35,14 @@ class ClinicalNotesMIMIC4(BaseTask):
             "discharge_note_times": (
                 "tuple_time_text",
                 {
-                    "tokenizer_name": "bert-base-uncased",
+                    "tokenizer_model": "bert-base-uncased",
                     "type_tag": "note",
                 },
             ),
             "radiology_note_times": (
                 "tuple_time_text",
                 {
-                    "tokenizer_name": "bert-base-uncased",
+                    "tokenizer_model": "bert-base-uncased",
                     "type_tag": "note",
                 },
             )
