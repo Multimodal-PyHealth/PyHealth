@@ -156,6 +156,33 @@ class ClinicalNotesMIMIC4(BaseTask):
         ]
 
 class ClinicalNotesICDLabsMIMIC4(BaseTask):
+    """Task for multimodal mortality prediction combining clinical notes, ICD codes, and lab values using MIMIC-IV.
+
+    Extends ``ClinicalNotesMIMIC4`` with two additional modalities:
+
+    - **ICD codes**: diagnosis and procedure codes per admission, processed by
+      ``StageNetProcessor`` with inter-admission time offsets.
+    - **Lab values**: 10-dimensional lab vectors (one per lab category) at each
+      measurement timestamp, processed by ``StageNetTensorProcessor``.
+
+    Lab categories (10 dimensions):
+        Sodium, Potassium, Chloride, Bicarbonate, Glucose, Calcium, Magnesium,
+        Anion Gap, Osmolality, Phosphate.
+
+    Examples:
+        >>> from pyhealth.datasets import MIMIC4Dataset
+        >>> from pyhealth.tasks.multimodal_mimic4 import ClinicalNotesICDLabsMIMIC4
+        >>> dataset = MIMIC4Dataset(
+        ...     ehr_root="/path/to/mimic-iv/2.2",
+        ...     note_root="/path/to/mimic-iv-note/2.2",
+        ...     ehr_tables=["diagnoses_icd", "procedures_icd",
+        ...                 "prescriptions", "labevents"],
+        ...     note_tables=["discharge", "radiology"],
+        ... )
+        >>> task = ClinicalNotesICDLabsMIMIC4()
+        >>> samples = dataset.set_task(task)
+    """
+
     task_name: str = "ClinicalNotesICDLabsMIMIC4"
     TOKEN_REPRESENTING_MISSING_TEXT = "<missing>"
     TOKEN_REPRESENTING_MISSING_FLOAT = float("nan")
