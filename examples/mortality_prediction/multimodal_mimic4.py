@@ -4,7 +4,7 @@ import os
 
 # PyHealth Packages
 from pyhealth.datasets import MIMIC4Dataset
-from pyhealth.tasks.multimodal_mimic4 import ClinicalNotesMIMIC4
+from pyhealth.tasks.multimodal_mimic4 import ClinicalNotesMIMIC4, ClinicalNotesICDLabsMIMIC4
 from pyhealth.tasks.base_task import BaseTask
 
 # Load MIMIC4 Files
