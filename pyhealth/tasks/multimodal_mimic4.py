@@ -3,9 +3,9 @@ from typing import Any, Dict, List, Optional, Union, Tuple
 
 from pyhealth.tasks.base_task import BaseTask
 
-class EHRFoundationalModelMIMIC4(BaseTask):
+class ClinicalNotesMIMIC4(BaseTask):
     
-    task_name: str = "EHRFoundationalModelMIMIC4"
+    task_name: str = "ClinicalNotesMIMIC4"
     TOKEN_REPRESENTING_MISSING_TEXT = "<missing>"
     TOKEN_REPRESENTING_MISSING_FLOAT = float("nan")
     
