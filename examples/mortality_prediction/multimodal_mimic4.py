@@ -12,6 +12,7 @@ from pyhealth.tasks.base_task import BaseTask
 # (see: https://github.com/sunlabuiuc/PyHealth/blob/master/examples/mortality_prediction/multimodal_mimic4_minimal.py)
 
 TASK = "CLINICALNOTES" # The idea here is that we want additive tasks so we can evaluate the value in adding more modalities
+
 PYHEALTH_REPO_ROOT = '/Users/wpang/Desktop/PyHealth'
 
 EHR_ROOT = os.path.join(PYHEALTH_REPO_ROOT, "local_data/local/data/physionet.org/files/mimiciv/2.2")
