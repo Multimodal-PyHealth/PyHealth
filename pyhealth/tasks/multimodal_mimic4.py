@@ -351,13 +351,16 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
                 [e.icd_code for e in diagnoses_icd if hasattr(e, "icd_code") and e.icd_code] +
                 [e.icd_code for e in procedures_icd if hasattr(e, "icd_code") and e.icd_code]
             )
-            if visit_icd_codes:
+            if visit_icd_codes: # If there are ICD diagnosis/inpatient procedure codes
                 if previous_admission_time is None:
                     time_from_previous = 0.0
                 else:
                     time_from_previous = (admission_time - previous_admission_time).total_seconds() / 3600.0
                 all_icd_codes.append(visit_icd_codes)
                 all_icd_times.append(time_from_previous)
+            else: # Add missingness token if there are no ICD diagnosis/inpatient procedure codes
+                all_icd_codes.append([self.TOKEN_REPRESENTING_MISSING_TEXT])
+                all_icd_times.append(self.TOKEN_REPRESENTING_MISSING_FLOAT)
 
             previous_admission_time = admission_time
 
@@ -388,7 +391,7 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
                         ts_labs = labevents_df.filter(pl.col("timestamp") == lab_ts)
                         lab_vector: List[Any] = []
                         for category_name in self.LAB_CATEGORY_NAMES:
-                            category_value = None
+                            category_value = self.TOKEN_REPRESENTING_MISSING_FLOAT
                             for itemid in self.LAB_CATEGORIES[category_name]:
                                 matching = ts_labs.filter(pl.col("labevents/itemid") == itemid)
                                 if matching.height > 0:
@@ -397,11 +400,11 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
                             lab_vector.append(category_value)
                         all_lab_values.append(lab_vector)
                         all_lab_times.append((lab_ts - admission_time).total_seconds() / 3600.0)
+                else: # If missing lab for a given admission
+                    all_lab_values.append([self.TOKEN_REPRESENTING_MISSING_FLOAT] * len(self.LAB_CATEGORY_NAMES))
+                    all_lab_times.append(self.TOKEN_REPRESENTING_MISSING_FLOAT)
 
-        if len(all_icd_codes) == 0:
-            all_icd_codes.append([self.TOKEN_REPRESENTING_MISSING_TEXT])
-            all_icd_times.append(self.TOKEN_REPRESENTING_MISSING_FLOAT)
-        if len(all_lab_values) == 0:
+        if len(all_lab_values) == 0: # If missing lab for ALL admissions
             all_lab_values.append([self.TOKEN_REPRESENTING_MISSING_FLOAT] * len(self.LAB_CATEGORY_NAMES))
             all_lab_times.append(self.TOKEN_REPRESENTING_MISSING_FLOAT)
 
