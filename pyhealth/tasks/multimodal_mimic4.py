@@ -24,8 +24,8 @@ class ClinicalNotesMIMIC4(BaseTask):
         >>> task = ClinicalNotesMIMIC4()
         >>> samples = dataset.set_task(task)
     """   
-    TOKEN_REPRESENTING_MISSING_TEXT = "<missing>"
-    TOKEN_REPRESENTING_MISSING_FLOAT = float("nan")
+    TOKEN_REPRESENTING_MISSING_TEXT = ""
+    TOKEN_REPRESENTING_MISSING_FLOAT = 0.0
 
     task_name: str = "ClinicalNotesMIMIC4"
     input_schema: Dict[str, Union[str, Tuple[str, Dict]]] = {
