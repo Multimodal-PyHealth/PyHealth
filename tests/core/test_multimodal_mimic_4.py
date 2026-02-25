@@ -81,14 +81,14 @@ class TestClinicalNotesMIMIC4(unittest.TestCase):
         hadm_1_radiology, hadm_2_radiology = radiology_texts
         hadm_1_radiology_time, hadm_2_radiology_time = radiology_times
 
-        self.assertEqual(hadm_1_discharge, "<missing>")
+        self.assertEqual(hadm_1_discharge, ClinicalNotesMIMIC4.TOKEN_REPRESENTING_MISSING_TEXT)
         self.assertTrue(math.isnan(hadm_1_discharge_time))
-        self.assertEqual(hadm_2_discharge, "<missing>")
+        self.assertEqual(hadm_2_discharge, ClinicalNotesMIMIC4.TOKEN_REPRESENTING_MISSING_TEXT)
         self.assertTrue(math.isnan(hadm_2_discharge_time))
 
-        self.assertEqual(hadm_1_radiology, "<missing>")
+        self.assertEqual(hadm_1_radiology, ClinicalNotesMIMIC4.TOKEN_REPRESENTING_MISSING_TEXT)
         self.assertTrue(math.isnan(hadm_1_radiology_time))
-        self.assertEqual(hadm_2_radiology, "<missing>")
+        self.assertEqual(hadm_2_radiology, ClinicalNotesMIMIC4.TOKEN_REPRESENTING_MISSING_TEXT)
         self.assertTrue(math.isnan(hadm_2_radiology_time))
 
     def test_mixed_admission_notes(self):
@@ -111,9 +111,9 @@ class TestClinicalNotesMIMIC4(unittest.TestCase):
         self.assertEqual(hadm_1_radiology, "CXR shows infiltrate.")
         self.assertAlmostEqual(hadm_1_radiology_time, 4.0)
 
-        self.assertEqual(hadm_2_discharge, "<missing>")
+        self.assertEqual(hadm_2_discharge, ClinicalNotesMIMIC4.TOKEN_REPRESENTING_MISSING_TEXT)
         self.assertTrue(math.isnan(hadm_2_discharge_time))
-        self.assertEqual(hadm_2_radiology, "<missing>")
+        self.assertEqual(hadm_2_radiology, ClinicalNotesMIMIC4.TOKEN_REPRESENTING_MISSING_TEXT)
         self.assertTrue(math.isnan(hadm_2_radiology_time))
 
     def test_task_schema(self):
