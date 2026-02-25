@@ -48,7 +48,8 @@ dependencies = [
   "jupyter>=1.1.1",
   "lab>=8.8",
   "nb-clean==4.0.1",
-  "pre-commit==4.0.1"
+  "pre-commit==4.0.1",
+  "pytest>=9.0.2",
 ]
 license = "BSD-3-Clause"
 license-files = ["LICENSE.md"]
