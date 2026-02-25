@@ -23,15 +23,12 @@ class ClinicalNotesMIMIC4(BaseTask):
         ... )
         >>> task = ClinicalNotesMIMIC4()
         >>> samples = dataset.set_task(task)
-    """
-
-    task_name: str = "ClinicalNotesMIMIC4"
+    """   
     TOKEN_REPRESENTING_MISSING_TEXT = "<missing>"
     TOKEN_REPRESENTING_MISSING_FLOAT = float("nan")
-    
-    def __init__(self):
-        """Initialize the EHR Foundational Model task."""
-        self.input_schema: Dict[str, Union[str, Tuple[str, Dict]]] = {
+
+    task_name: str = "ClinicalNotesMIMIC4"
+    input_schema: Dict[str, Union[str, Tuple[str, Dict]]] = {
             "discharge_note_times": (
                 "tuple_time_text",
                 {
@@ -47,7 +44,10 @@ class ClinicalNotesMIMIC4(BaseTask):
                 },
             )
         }
-        self.output_schema: Dict[str, str] = {"mortality": "binary"}
+    output_schema: Dict[str, str] = {"mortality": "binary"}
+    
+    def __init__(self):
+        """Initialize the EHR Foundational Model task."""
 
     def _clean_text(self, text: Optional[str]) -> Optional[str]:
         """Return text if non-empty, otherwise None."""
