@@ -145,11 +145,12 @@ class ClinicalNotesMIMIC4(BaseTask):
         discharge_note_times_from_admission = (all_discharge_texts, all_discharge_times_from_admission)
         radiology_note_times_from_admission = (all_radiology_texts, all_radiology_times_from_admission)
 
-        return [
-            {
+        single_patient_longitudinal_record = {
                 "patient_id": patient.patient_id,
                 "discharge_note_times": discharge_note_times_from_admission,
                 "radiology_note_times": radiology_note_times_from_admission,
                 "mortality": mortality_label,
             }
+        return [
+            single_patient_longitudinal_record
         ]
