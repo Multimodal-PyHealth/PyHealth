@@ -26,9 +26,27 @@ class ClinicalNotesMIMIC4(BaseTask):
         >>> samples = dataset.set_task(task)
     """
 
+    TOKEN_REPRESENTING_MISSING_TEXT = ""
+    TOKEN_REPRESENTING_MISSING_FLOAT = 0.0
+
     task_name: str = "ClinicalNotesMIMIC4"
-    TOKEN_REPRESENTING_MISSING_TEXT = "<missing>"
-    TOKEN_REPRESENTING_MISSING_FLOAT = float("nan")
+    input_schema: Dict[str, Union[str, Tuple[str, Dict]]] = {
+            "discharge_note_times": (
+                "tuple_time_text",
+                {
+                    "tokenizer_model": "bert-base-uncased",
+                    "type_tag": "note",
+                },
+            ),
+            "radiology_note_times": (
+                "tuple_time_text",
+                {
+                    "tokenizer_model": "bert-base-uncased",
+                    "type_tag": "note",
+                },
+            )
+        }
+    output_schema: Dict[str, str] = {"mortality": "binary"}
     
     def __init__(self):
         """Initialize the EHR Foundational Model task."""
@@ -146,13 +164,15 @@ class ClinicalNotesMIMIC4(BaseTask):
         discharge_note_times_from_admission = (all_discharge_texts, all_discharge_times_from_admission)
         radiology_note_times_from_admission = (all_radiology_texts, all_radiology_times_from_admission)
 
-        return [
-            {
+        single_patient_longitudinal_record = {
                 "patient_id": patient.patient_id,
                 "discharge_note_times": discharge_note_times_from_admission,
                 "radiology_note_times": radiology_note_times_from_admission,
                 "mortality": mortality_label,
             }
+
+        return [
+            single_patient_longitudinal_record
         ]
 
 class ClinicalNotesICDLabsMIMIC4(BaseTask):
@@ -182,11 +202,28 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
         >>> task = ClinicalNotesICDLabsMIMIC4()
         >>> samples = dataset.set_task(task)
     """
+    TOKEN_REPRESENTING_MISSING_TEXT = ""
+    TOKEN_REPRESENTING_MISSING_FLOAT = 0.0
+    PADDING: int = 0
 
     task_name: str = "ClinicalNotesICDLabsMIMIC4"
-    TOKEN_REPRESENTING_MISSING_TEXT = "<missing>"
-    TOKEN_REPRESENTING_MISSING_FLOAT = float("nan")
-    PADDING: int = 0
+    input_schema: Dict[str, Union[str, Tuple[str, Dict]]] = {
+            "discharge_note_times": (
+                "tuple_time_text",
+                {
+                    "tokenizer_model": "bert-base-uncased",
+                    "type_tag": "note",
+                },
+            ),
+            "radiology_note_times": (
+                "tuple_time_text",
+                {
+                    "tokenizer_model": "bert-base-uncased",
+                    "type_tag": "note",
+                },
+            )
+        }
+    output_schema: Dict[str, str] = {"mortality": "binary"}
 
     LAB_CATEGORIES: ClassVar[Dict[str, List[str]]] = {
         "Sodium": ["50824", "52455", "50983", "52623"],
@@ -411,8 +448,7 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
         discharge_note_times_from_admission = (all_discharge_texts, all_discharge_times_from_admission)
         radiology_note_times_from_admission = (all_radiology_texts, all_radiology_times_from_admission)
 
-        return [
-            {
+        single_patient_longitudinal_record = {
                 "patient_id": patient.patient_id,
                 "discharge_note_times": discharge_note_times_from_admission,
                 "radiology_note_times": radiology_note_times_from_admission,
@@ -420,4 +456,7 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
                 "labs": (all_lab_times, all_lab_values),
                 "mortality": mortality_label,
             }
+        
+        return [
+            single_patient_longitudinal_record
         ]
