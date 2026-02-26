@@ -57,31 +57,40 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
             except Exception as e:
                 raise ValueError(f"Failed to load tokenizer '{self.tokenizer_model}': {e}")
 
-    def process(self, value: Tuple[List[str], List[float]]) -> Union[Tuple[List[str], torch.Tensor, str], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str]]:
+    def process(self, value: Tuple[List[str], List[float]]) -> Union[Tuple[List[str], torch.Tensor, torch.Tensor, str], Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, str]]:
         """Process a tuple of texts and time differences.
         
         Args:
             value: Tuple containing:
                 - List[str]: Text entries (clinical notes, observations, etc.)
-                - List[float]: Time differences corresponding to each text entry
+                - List[float]: Time differences corresponding to each text entry.
+                    NaN values are treated as missing timesteps: they are replaced
+                    with 0.0 in the time tensor and marked False in ``time_mask``.
         
         Returns:
             If tokenizer_model is None:
                 Tuple containing:
                     - List[str]: Original text entries (unmodified)
-                    - torch.Tensor: 1D float tensor of time differences [shape: (N,)]
+                    - torch.Tensor: 1D float tensor of time differences, NaN→0.0 [shape: (N,)]
+                    - torch.Tensor: Boolean mask, True=real timestep [shape: (N,)]
                     - str: Type tag for modality routing
             
             If tokenizer_model is provided:
                 Tuple containing:
                     - torch.Tensor: input_ids [shape: (N, max_length)]
                     - torch.Tensor: attention_mask [shape: (N, max_length)]
-                    - torch.Tensor: token_type_ids [shape: (N, max_length)] (if supported by tokenizer)
-                    - torch.Tensor: 1D float tensor of time differences [shape: (N,)]
+                    - torch.Tensor: token_type_ids [shape: (N, max_length)]
+                    - torch.Tensor: time differences, NaN→0.0 [shape: (N,)]
+                    - torch.Tensor: Boolean mask, True=real timestep [shape: (N,)]
                     - str: Type tag
         """
         texts, time_diffs = value
         time_tensor = torch.tensor(time_diffs, dtype=torch.float32)
+
+        # Boolean mask: True where time is a real observation, False where NaN (missing).
+        # NaN slots are zeroed out so downstream ops never receive NaN.
+        time_mask = ~torch.isnan(time_tensor)          # (N,)  True = real
+        time_tensor = time_tensor.nan_to_num(nan=0.0)  # (N,)  safe for all ops
 
         if self.tokenizer is not None:
             # Tokenize the list of texts
@@ -100,14 +109,11 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
             if "token_type_ids" in encoded:
                 token_type_ids = encoded["token_type_ids"]
             else:
-                # meaningful text usually 0, padding 0? BERT uses 0 for sent A. 
-                # If not provided, we can just use zeros or omit. 
-                # For consistency with schema, let's provide zeros if expected.
                 token_type_ids = torch.zeros_like(input_ids)
 
-            return input_ids, attention_mask, token_type_ids, time_tensor, self.type_tag
+            return input_ids, attention_mask, token_type_ids, time_tensor, time_mask, self.type_tag
 
-        return texts, time_tensor, self.type_tag
+        return texts, time_tensor, time_mask, self.type_tag
     
     def size(self):
         """Return the size of the processor vocabulary (not applicable for this processor)."""
@@ -122,19 +128,16 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
     def schema(self) -> tuple[str, ...]:
         """Returns the schema of the processed feature."""
         if self.tokenizer is not None:
-            # "value" corresponds to input_ids, "mask" to attention_mask
-            return ("value", "mask", "token_type_ids", "time", "type_tag")
-        return ("text", "time", "type_tag")
+            # "value"=input_ids, "mask"=attention_mask, "time_mask"=valid timestep mask
+            return ("value", "mask", "token_type_ids", "time", "time_mask", "type_tag")
+        return ("text", "time", "time_mask", "type_tag")
 
     def dim(self) -> tuple[int, ...]:
         """Number of dimensions for each output tensor."""
         if self.tokenizer is not None:
-            # input_ids: (seq_len,), attention_mask: (seq_len,), token_type_ids: (seq_len,), time: ()
-            # Note: process returns batched items if fit? No, process operates on a single sample's field value.
-            # Here 'value' is (List[str], List[float]) -> representing N notes for ONE patient (or visit).
-            # The output input_ids is (N, max_length), which is 2 dimensions.
-            return (2, 2, 2, 1)
-        return (0, 1, 0) # text list has 0 tensor dims, time tensor has 1 dim
+            # input_ids (N,L), attention_mask (N,L), token_type_ids (N,L), time (N,), time_mask (N,)
+            return (2, 2, 2, 1, 1)
+        return (0, 1, 1, 0)  # text list, time (N,), time_mask (N,), type_tag str
 
     def modality(self) -> ModalityType:
         """Clinical text → TEXT modality."""
@@ -152,7 +155,12 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
         litdata-serialisable and cannot be embedded without tokenisation).
 
         Returns:
-            {"value": LongTensor (N, L), "mask": LongTensor (N, L), "time": FloatTensor (N,)}
+            {
+                "value":     LongTensor  (N, L)  – input_ids
+                "mask":      LongTensor  (N, L)  – attention_mask
+                "time":      FloatTensor (N,)    – time offsets, NaN replaced with 0.0
+                "time_mask": BoolTensor  (N,)    – True = real timestep, False = missing
+            }
 
         Raises:
             ValueError: If processor was created without a tokenizer.
@@ -162,11 +170,12 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
                 "TupleTimeTextProcessor.process_temporal() requires a tokenizer. "
                 "Pass tokenizer_model='...' when creating the processor."
             )
-        result = self.process(value)  # (input_ids, mask, type_ids, time, tag)
+        result = self.process(value)  # (input_ids, attn_mask, type_ids, time, time_mask, tag)
         return {
-            "value": result[0],  # input_ids  (N, L)
-            "mask":  result[1],  # attention_mask (N, L)
-            "time":  result[3],  # time tensor (N,)
+            "value":     result[0],  # input_ids       (N, L)
+            "mask":      result[1],  # attention_mask  (N, L)
+            "time":      result[3],  # time offsets    (N,)
+            "time_mask": result[4],  # valid mask      (N,)  True=real
         }
 
     def __repr__(self):
