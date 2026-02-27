@@ -1,12 +1,1 @@
-# Will's Isolated Development Environment
-
-### Precommit (Clean Notebooks, Linting)
-Add in precommit:
-```
-uvx pre-commit install
-```
-
-Run precommit:
-```
-pre-commit run --all-files
-```
+# Moving to README.md but keep this file as I think it errors out if removed
