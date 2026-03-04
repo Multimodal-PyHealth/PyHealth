@@ -138,9 +138,6 @@ data/physionet.org/
 # VSCode settings
 .vscode/
 
-# uv
-uv.lock
-
 # Local Data
 local_data/
 
