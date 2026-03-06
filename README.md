@@ -3,11 +3,16 @@
 
 ### Precommit (Clean Notebooks, Linting)
 Add in precommit:
-```
+```bash
 uvx pre-commit install
 ```
 
 Run precommit:
-```
+```bash
 pre-commit run --all-files
+```
+
+Uninstall precommit (when switching between branches):
+```bash
+pre-commit uninstall
 ```
