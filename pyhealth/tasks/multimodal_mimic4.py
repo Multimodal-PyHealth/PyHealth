@@ -23,8 +23,10 @@ class ClinicalNotesMIMIC4(BaseTask):
         ... )
         >>> task = ClinicalNotesMIMIC4()
         >>> samples = dataset.set_task(task)
-    """
 
+    Note on time encoding:
+        - [Per Admission Granularity] Notes use time (hours) relative to each admission time.
+    """
     TOKEN_REPRESENTING_MISSING_TEXT = ""
     TOKEN_REPRESENTING_MISSING_FLOAT = 0.0
 
@@ -113,6 +115,7 @@ class ClinicalNotesMIMIC4(BaseTask):
                 event_type="radiology", filters=[("hadm_id", "==", admission.hadm_id)]
             )
 
+            # For all discharge notes in a single admission:
             for note in discharge_notes: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
@@ -128,6 +131,7 @@ class ClinicalNotesMIMIC4(BaseTask):
                 all_discharge_texts.append(self.TOKEN_REPRESENTING_MISSING_TEXT) # Token representing missing text
                 all_discharge_times_from_admission.append(self.TOKEN_REPRESENTING_MISSING_FLOAT) # Token representing missing time(?)
 
+            # For all radiology notes in a single admission:
             for note in radiology_notes: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
@@ -172,6 +176,13 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
     where ``True`` means the value was observed and ``False`` means it was
     imputed w/ 0.0. Downstream models should use this mask to seperate
     real zeros from missing data fill values.
+
+    Note on time encoding:
+        - [Per Admission Granularity] Notes and labs use time (hours) relative to each admission time.
+        - [Per Admission Granularity] ICD codes use inter-admission gap (time (hours) between previous and current
+          admission time), since ICD codes represent the whole visit and have no
+          within-admission timestamp. This is intentionally inconsistent and may
+          be revisited (e.g. time since first admission, or always 0.0).
 
     Examples:
         >>> from pyhealth.datasets import MIMIC4Dataset
@@ -323,6 +334,7 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
                 event_type="radiology", filters=[("hadm_id", "==", admission.hadm_id)]
             )
 
+            # For all discharge notes in a single admission:
             for note in discharge_notes: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
@@ -338,6 +350,7 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
                 all_discharge_texts.append(self.TOKEN_REPRESENTING_MISSING_TEXT) # Token representing missing text
                 all_discharge_times_from_admission.append(self.TOKEN_REPRESENTING_MISSING_FLOAT) # Token representing missing time(?)
 
+            # For all radiology notes in a single admission:
             for note in radiology_notes: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
@@ -375,7 +388,7 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
                 all_icd_codes.append([self.TOKEN_REPRESENTING_MISSING_TEXT])
                 all_icd_times.append(self.TOKEN_REPRESENTING_MISSING_FLOAT)
 
-            previous_admission_time = admission_time
+            previous_admission_time = admission_time  # Advance rolling reference for next admission's time delta
 
             # Lab events with time relative to this admission's start
             labevents_df = patient.get_events(
@@ -443,6 +456,25 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
         ]
 
 class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
+    """Task for multimodal mortality prediction combining clinical notes, ICD codes, lab values, and chest X-rays using MIMIC-IV.
+
+    Extends ``ClinicalNotesICDLabsMIMIC4`` with two additional CXR modalities:
+
+    - **image_path**: path to the first available chest X-ray image for the patient.
+    - **negbio_findings**: deduplicated list of positive NegBio findings across all X-rays.
+
+    CXR data is processed at the patient level (not per-admission), since MIMIC-CXR
+    studies are not always linked to a specific ``hadm_id``.
+
+    Note on time encoding:
+        - [Per Admission Granularity] Notes and labs use time (hours) relative to each admission time.
+        - [Per Admission Granularity] ICD codes use inter-admission gap (time (hours) between previous and current
+          admission time), since ICD codes represent the whole visit and have no
+          within-admission timestamp. This is intentionally inconsistent and may
+          be revisited (e.g. time since first admission, or always 0.0).
+        - [Per Patient Granularity] CXR timestamps are currently not encoded; encoding options include time
+          relative to first admission or time relative to nearest admission.
+    """
     TOKEN_REPRESENTING_MISSING_TEXT = ""
     TOKEN_REPRESENTING_MISSING_FLOAT = 0.0
     PADDING: int = 0
@@ -623,7 +655,6 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
             if admission_dischtime < admission_time:
                 continue
 
-            # Get notes for this hadm_id only
             discharge_notes = patient.get_events(
                 event_type="discharge", filters=[("hadm_id", "==", admission.hadm_id)]
             )
@@ -631,6 +662,7 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
                 event_type="radiology", filters=[("hadm_id", "==", admission.hadm_id)]
             )
 
+            # For all discharge notes in a single admission:
             for note in discharge_notes: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
@@ -646,6 +678,7 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
                 all_discharge_texts.append(self.TOKEN_REPRESENTING_MISSING_TEXT) # Token representing missing text
                 all_discharge_times_from_admission.append(self.TOKEN_REPRESENTING_MISSING_FLOAT) # Token representing missing time(?)
 
+            # For all radiology notes in a single admission:
             for note in radiology_notes: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
@@ -683,7 +716,7 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
                 all_icd_codes.append([self.TOKEN_REPRESENTING_MISSING_TEXT])
                 all_icd_times.append(self.TOKEN_REPRESENTING_MISSING_FLOAT)
 
-            previous_admission_time = admission_time
+            previous_admission_time = admission_time  # Advance rolling reference for next admission's time delta
 
             # Lab events with time relative to this admission's start
             labevents_df = patient.get_events(
