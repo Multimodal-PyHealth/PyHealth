@@ -4,14 +4,14 @@ import os
 
 # PyHealth Packages
 from pyhealth.datasets import MIMIC4Dataset
-from pyhealth.tasks.multimodal_mimic4 import ClinicalNotesMIMIC4, ClinicalNotesICDLabsMIMIC4
+from pyhealth.tasks.multimodal_mimic4 import ClinicalNotesMIMIC4, ClinicalNotesICDLabsMIMIC4, ClinicalNotesICDLabsCXRMIMIC4
 from pyhealth.tasks.base_task import BaseTask
 
 # Load MIMIC4 Files
 # There's probably better ways dealing with this on the cluster, but working locally for now 
 # (see: https://github.com/sunlabuiuc/PyHealth/blob/master/examples/mortality_prediction/multimodal_mimic4_minimal.py)
 
-TASK = "ClinicalNotesICDLabsMIMIC4" # The idea here is that we want additive tasks so we can evaluate the value in adding more modalities
+TASK = "ClinicalNotesICDLabsCXRMIMIC4" # The idea here is that we want additive tasks so we can evaluate the value in adding more modalities
 
 PYHEALTH_REPO_ROOT = '/Users/wpang/Desktop/PyHealth'
 
@@ -19,6 +19,8 @@ EHR_ROOT = os.path.join(PYHEALTH_REPO_ROOT, "local_data/local/data/physionet.org
 NOTE_ROOT = os.path.join(PYHEALTH_REPO_ROOT, "local_data/local/data/physionet.org/files/mimic-iv-note/2.2")
 CXR_ROOT = os.path.join(PYHEALTH_REPO_ROOT,"local_data/local/data/physionet.org/files/mimic-cxr-jpg/2.0.0")
 CACHE_DIR = os.path.join(PYHEALTH_REPO_ROOT,"local_data/local/data/wp/pyhealth_cache")
+
+DEV_MODE = True
 
 if __name__ == "__main__":
 
@@ -30,7 +32,7 @@ if __name__ == "__main__":
                 note_tables=["discharge", "radiology"],
                 cache_dir=CACHE_DIR,
                 num_workers=8,
-                dev=True
+                dev=DEV_MODE
             )
         
         # Apply multimodal task
@@ -49,11 +51,32 @@ if __name__ == "__main__":
                 note_tables=["discharge", "radiology"],
                 cache_dir=CACHE_DIR,
                 num_workers=8,
-                dev=True
+                dev=DEV_MODE
             )
         
         # Apply multimodal task
         task = ClinicalNotesICDLabsMIMIC4() 
+        samples = dataset.set_task(task)
+
+        # Get and print sample
+        sample = samples[0]
+        print(sample)
+
+    elif TASK == 'ClinicalNotesICDLabsCXRMIMIC4':
+        dataset = MIMIC4Dataset(
+                ehr_root=EHR_ROOT,
+                note_root=NOTE_ROOT,
+                cxr_root=CXR_ROOT,
+                ehr_tables=["diagnoses_icd", "procedures_icd", "prescriptions", "labevents"],
+                note_tables=["discharge", "radiology"],
+                cxr_tables=["metadata", "negbio"],
+                cache_dir=CACHE_DIR,
+                num_workers=8,
+                dev=DEV_MODE
+            )
+        
+        # Apply multimodal task
+        task = ClinicalNotesICDLabsCXRMIMIC4() 
         samples = dataset.set_task(task)
 
         # Get and print sample
