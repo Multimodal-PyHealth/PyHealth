@@ -472,8 +472,8 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
           admission time), since ICD codes represent the whole visit and have no
           within-admission timestamp. This is intentionally inconsistent and may
           be revisited (e.g. time since first admission, or always 0.0).
-        - [Per Patient Granularity] CXR timestamps are currently not encoded; encoding options include time
-          relative to first admission or time relative to nearest admission.
+        - [Per Patient Granularity] CXR time is encoded as hours relative to the nearest admission start time
+          in ``admissions_to_process``.
     """
     TOKEN_REPRESENTING_MISSING_TEXT = ""
     TOKEN_REPRESENTING_MISSING_FLOAT = 0.0
@@ -498,8 +498,8 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
             "icd_codes": ("stagenet", {"padding": PADDING}),
             "labs": ("stagenet_tensor", {}),
             "labs_mask": ("stagenet_tensor", {}),
-            "image_path": "text",  # Image path as text string
-            "negbio_findings": "sequence",  # NegBio X-ray findings
+            "image_path": "tuple_time_text",  # (image_path, hours_from_nearest_admission)
+            "negbio_findings": "tuple_time_sequence",  # (negbio_findings, hours_from_nearest_admission)
         }
     output_schema: Dict[str, str] = {"mortality": "binary"}
 
@@ -591,7 +591,8 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
         all_lab_masks: List[List[bool]] = []  # True = observed, False = imputed 0.0
         all_lab_times: List[float] = []
         all_negbio_findings = []
-        image_path = self.TOKEN_REPRESENTING_MISSING_TEXT 
+        image_path = self.TOKEN_REPRESENTING_MISSING_TEXT
+        image_hours_from_nearest_admission = self.TOKEN_REPRESENTING_MISSING_FLOAT
         previous_admission_time = None
 
         # [Chest XRays]: Process at patient level, not admission-level
@@ -631,15 +632,26 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
         else: # If there is no negbio attribute in all CXRs for a given patient
             unique_negbio = [self.TOKEN_REPRESENTING_MISSING_TEXT]
 
-        # Get first available image path from metadata
+        # Get first available image path and timestamp from metadata
+        image_timestamp = None
         for event in metadata_events:
             try:
                 if event.image_path:
                     image_path = event.image_path
+                    image_timestamp = event.timestamp
                     break  # Use first valid image
             except AttributeError:
                 pass
-        # If no image path, image_path = self.TOKEN_REPRESENTING_MISSING_TEXT is returned
+
+        # Compute CXR time relative to nearest admission in admissions_to_process
+        if image_timestamp is not None and admissions_to_process:
+            nearest_admission = min(
+                admissions_to_process,
+                key=lambda a: abs((image_timestamp - a.timestamp).total_seconds()),
+            )
+            image_hours_from_nearest_admission = (
+                (image_timestamp - nearest_admission.timestamp).total_seconds() / 3600.0
+            )
 
         # [Clinical Notes, EHR, Labs]: Process each admission independently (per hadm_id)
         for admission in admissions_to_process:
@@ -771,6 +783,7 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
 
         single_patient_longitudinal_record = {
                 "patient_id": patient.patient_id,
+<<<<<<< Updated upstream
                 "discharge_note_times": (all_discharge_texts, all_discharge_times_from_admission),
                 "radiology_note_times": (all_radiology_texts, all_radiology_times_from_admission),
                 "icd_codes": (all_icd_times, all_icd_codes),
@@ -778,6 +791,15 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
                 "labs_mask": (all_lab_times, all_lab_masks),
                 "image_path": image_path,
                 "negbio_findings": unique_negbio,
+=======
+                "discharge_note_times": (all_discharge_texts, all_discharge_hours_from_admission),
+                "radiology_note_times": (all_radiology_texts, all_radiology_hours_from_admission),
+                "icd_codes": (all_icd_inter_admission_hours, all_icd_codes),
+                "labs": (all_lab_hours_from_admission, all_lab_values),
+                "labs_mask": (all_lab_hours_from_admission, all_lab_masks),
+                "image_path": (image_path, image_hours_from_nearest_admission),
+                "negbio_findings": (unique_negbio, image_hours_from_nearest_admission),
+>>>>>>> Stashed changes
                 "mortality": mortality_label,
             }
 
