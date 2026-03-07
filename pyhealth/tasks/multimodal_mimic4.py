@@ -783,15 +783,6 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
 
         single_patient_longitudinal_record = {
                 "patient_id": patient.patient_id,
-<<<<<<< Updated upstream
-                "discharge_note_times": (all_discharge_texts, all_discharge_times_from_admission),
-                "radiology_note_times": (all_radiology_texts, all_radiology_times_from_admission),
-                "icd_codes": (all_icd_times, all_icd_codes),
-                "labs": (all_lab_times, all_lab_values),
-                "labs_mask": (all_lab_times, all_lab_masks),
-                "image_path": image_path,
-                "negbio_findings": unique_negbio,
-=======
                 "discharge_note_times": (all_discharge_texts, all_discharge_hours_from_admission),
                 "radiology_note_times": (all_radiology_texts, all_radiology_hours_from_admission),
                 "icd_codes": (all_icd_inter_admission_hours, all_icd_codes),
@@ -799,7 +790,6 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
                 "labs_mask": (all_lab_hours_from_admission, all_lab_masks),
                 "image_path": (image_path, image_hours_from_nearest_admission),
                 "negbio_findings": (unique_negbio, image_hours_from_nearest_admission),
->>>>>>> Stashed changes
                 "mortality": mortality_label,
             }
 
