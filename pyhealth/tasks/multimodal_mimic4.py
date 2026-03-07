@@ -788,8 +788,8 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
                 "icd_codes": (all_icd_inter_admission_hours, all_icd_codes),
                 "labs": (all_lab_hours_from_admission, all_lab_values),
                 "labs_mask": (all_lab_hours_from_admission, all_lab_masks),
-                "image_path": (image_path, image_hours_from_nearest_admission),
-                "negbio_findings": (unique_negbio, image_hours_from_nearest_admission),
+                "image_path": image_path,
+                "negbio_findings": unique_negbio,
                 "mortality": mortality_label,
             }
 
