@@ -32,14 +32,14 @@ class ClinicalNotesMIMIC4(BaseTask):
 
     task_name: str = "ClinicalNotesMIMIC4"
     input_schema: Dict[str, Union[str, Tuple[str, Dict]]] = {
-            "discharge_note_times": (
+            "discharge_notes": (
                 "tuple_time_text",
                 {
                     "tokenizer_model": "bert-base-uncased",
                     "type_tag": "note",
                 },
             ),
-            "radiology_note_times": (
+            "radiology_notes": (
                 "tuple_time_text",
                 {
                     "tokenizer_model": "bert-base-uncased",
@@ -108,15 +108,15 @@ class ClinicalNotesMIMIC4(BaseTask):
             admission_time = admission.timestamp
 
             # Get notes for this hadm_id only
-            discharge_notes = patient.get_events(
+            discharge_notess = patient.get_events(
                 event_type="discharge", filters=[("hadm_id", "==", admission.hadm_id)]
             )
-            radiology_notes = patient.get_events(
+            radiology_notess = patient.get_events(
                 event_type="radiology", filters=[("hadm_id", "==", admission.hadm_id)]
             )
 
             # For all discharge notes in a single admission:
-            for note in discharge_notes: #TODO: Maybe make this into a helper function?
+            for note in discharge_notess: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
                     if note_text:
@@ -127,12 +127,12 @@ class ClinicalNotesMIMIC4(BaseTask):
                         all_discharge_hours_from_admission.append(time_from_admission)
                 except AttributeError: # note object is missing .text or .timestamp attribute (e.g. malformed note)
                     pass
-            if not discharge_notes: # If we get an empty list
+            if not discharge_notess: # If we get an empty list
                 all_discharge_texts.append(self.TOKEN_REPRESENTING_MISSING_TEXT) # Token representing missing text
                 all_discharge_hours_from_admission.append(self.TOKEN_REPRESENTING_MISSING_FLOAT) # Token representing missing time(?)
 
             # For all radiology notes in a single admission:
-            for note in radiology_notes: #TODO: Maybe make this into a helper function?
+            for note in radiology_notess: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
                     if note_text:
@@ -143,14 +143,14 @@ class ClinicalNotesMIMIC4(BaseTask):
                         all_radiology_hours_from_admission.append(time_from_admission)
                 except AttributeError: # note object is missing .text or .timestamp attribute (e.g. malformed note)
                     pass
-            if not radiology_notes: # If we receive empty list
+            if not radiology_notess: # If we receive empty list
                 all_radiology_texts.append(self.TOKEN_REPRESENTING_MISSING_TEXT) # Token representing missing text
                 all_radiology_hours_from_admission.append(self.TOKEN_REPRESENTING_MISSING_FLOAT) # Token representing missing time(?)
 
         single_patient_longitudinal_record = {
                 "patient_id": patient.patient_id,
-                "discharge_note_times": (all_discharge_texts, all_discharge_hours_from_admission),
-                "radiology_note_times": (all_radiology_texts, all_radiology_hours_from_admission),
+                "discharge_notes": (all_discharge_texts, all_discharge_hours_from_admission),
+                "radiology_notes": (all_radiology_texts, all_radiology_hours_from_admission),
                 "mortality": mortality_label,
             }
 
@@ -165,10 +165,10 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
 
     - **ICD codes**: diagnosis and procedure codes per admission, processed by
       ``StageNetProcessor`` with inter-admission time offsets.
-    - **Lab values**: N-dimensional lab vectors (one per lab category) at each
+    - **Lab values**: N_Lab_Category lab vectors (one per lab category) at each
       measurement timestamp, processed by ``StageNetTensorProcessor``.
 
-    Lab categories (N dimensions):
+    Lab categories (N_Lab_Category):
         Sodium, Potassium, Chloride, Bicarbonate, Glucose, Calcium, Magnesium,
         Anion Gap, Osmolality, Phosphate.
 
@@ -203,14 +203,14 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
 
     task_name: str = "ClinicalNotesICDLabsMIMIC4"
     input_schema: Dict[str, Union[str, Tuple[str, Dict]]] = {
-            "discharge_note_times": (
+            "discharge_notes": (
                 "tuple_time_text",
                 {
                     "tokenizer_model": "bert-base-uncased",
                     "type_tag": "note",
                 },
             ),
-            "radiology_note_times": (
+            "radiology_notes": (
                 "tuple_time_text",
                 {
                     "tokenizer_model": "bert-base-uncased",
@@ -327,15 +327,15 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
                 continue
 
             # Get notes for this hadm_id only
-            discharge_notes = patient.get_events(
+            discharge_notess = patient.get_events(
                 event_type="discharge", filters=[("hadm_id", "==", admission.hadm_id)]
             )
-            radiology_notes = patient.get_events(
+            radiology_notess = patient.get_events(
                 event_type="radiology", filters=[("hadm_id", "==", admission.hadm_id)]
             )
 
             # For all discharge notes in a single admission:
-            for note in discharge_notes: #TODO: Maybe make this into a helper function?
+            for note in discharge_notess: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
                     if note_text:
@@ -346,12 +346,12 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
                         all_discharge_hours_from_admission.append(time_from_admission)
                 except AttributeError: # note object is missing .text or .timestamp attribute (e.g. malformed note)
                     pass
-            if not discharge_notes: # If we get an empty list
+            if not discharge_notess: # If we get an empty list
                 all_discharge_texts.append(self.TOKEN_REPRESENTING_MISSING_TEXT) # Token representing missing text
                 all_discharge_hours_from_admission.append(self.TOKEN_REPRESENTING_MISSING_FLOAT) # Token representing missing time(?)
 
             # For all radiology notes in a single admission:
-            for note in radiology_notes: #TODO: Maybe make this into a helper function?
+            for note in radiology_notess: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
                     if note_text:
@@ -362,7 +362,7 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
                         all_radiology_hours_from_admission.append(time_from_admission)
                 except AttributeError: # note object is missing .text or .timestamp attribute (e.g. malformed note)
                     pass
-            if not radiology_notes: # If we receive empty list
+            if not radiology_notess: # If we receive empty list
                 all_radiology_texts.append(self.TOKEN_REPRESENTING_MISSING_TEXT) # Token representing missing text
                 all_radiology_hours_from_admission.append(self.TOKEN_REPRESENTING_MISSING_FLOAT) # Token representing missing time(?)
 
@@ -443,8 +443,8 @@ class ClinicalNotesICDLabsMIMIC4(BaseTask):
 
         single_patient_longitudinal_record = {
                 "patient_id": patient.patient_id,
-                "discharge_note_times": (all_discharge_texts, all_discharge_hours_from_admission),
-                "radiology_note_times": (all_radiology_texts, all_radiology_hours_from_admission),
+                "discharge_notes": (all_discharge_texts, all_discharge_hours_from_admission),
+                "radiology_notes": (all_radiology_texts, all_radiology_hours_from_admission),
                 "icd_codes": (all_icd_inter_admission_hours, all_icd_codes),
                 "labs": (all_lab_hours_from_admission, all_lab_values),
                 "labs_mask": (all_lab_hours_from_admission, all_lab_masks),
@@ -481,14 +481,14 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
 
     task_name: str = "ClinicalNotesICDLabsCXRMIMIC4"
     input_schema: Dict[str, Union[str, Tuple[str, Dict]]] = {
-            "discharge_note_times": (
+            "discharge_notes": (
                 "tuple_time_text",
                 {
                     "tokenizer_model": "bert-base-uncased",
                     "type_tag": "note",
                 },
             ),
-            "radiology_note_times": (
+            "radiology_notes": (
                 "tuple_time_text",
                 {
                     "tokenizer_model": "bert-base-uncased",
@@ -607,51 +607,52 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
         all_lab_values: List[List[Any]] = []
         all_lab_masks: List[List[bool]] = []  # True = observed, False = imputed 0.0
         all_lab_hours_from_admission: List[float] = []
-        all_negbio_findings = []
-        image_path = self.TOKEN_REPRESENTING_MISSING_TEXT
-        image_hours_from_nearest_admission = self.TOKEN_REPRESENTING_MISSING_FLOAT
+        all_negbio_findings: List[List[Any]] = []
+        all_cxr_image_paths: List[str] = []
+        all_cxr_hours_relative_to_nearest_admission: List[float] = []
+
         previous_admission_time = None
 
-        # [Chest cxrs]: Process at patient level, not admission-level
+        # [Chest X-Rays (CXRs)]: Process at patient level, not admission-level
         negbio_events = patient.get_events(event_type="negbio")
         metadata_events = patient.get_events(event_type="metadata")
         
-        negbio_vector = []
         for cxr in negbio_events: # Loop through each CXR
+            negbio_vector = [] # Per CXR Vector
             try:
                 for finding_name in self.NEGBIO_FINDING_NAMES: # Check each CXR's NEGBIO_FINDING_NAMES
                     try:
-                        negbio_value = getattr(cxr, finding_name, None)
-                        if negbio_value is not None and float(negbio_value) > 0:
-                            all_negbio_findings.append(finding_name)
+                        negbio_value = getattr(cxr, finding_name, self.TOKEN_REPRESENTING_MISSING_TEXT) 
+                        if negbio_value!= self.TOKEN_REPRESENTING_MISSING_TEXT and float(negbio_value) > 0:
+                            negbio_vector.append(finding_name)
                     except (ValueError, TypeError, AttributeError):
-                        pass
-            except Exception:
-                pass
-        
-        if all_negbio_findings: 
-            unique_negbio = list(dict.fromkeys(all_negbio_findings)) # Deduplicate negbio findings (flat sequence)
-        else: # If there is no negbio attribute in all CXRs for a given patient
-            unique_negbio = [self.TOKEN_REPRESENTING_MISSING_TEXT]
+                        negbio_vector.append(self.TOKEN_REPRESENTING_MISSING_TEXT)
+            except Exception: # Missing negbio for a given cxr returns a N-length vector of MISSING_TOKEN
+                negbio_vector = [self.TOKEN_REPRESENTING_MISSING_TEXT] * len(self.NEGBIO_FINDING_NAMES)
+
+            all_negbio_findings.append(negbio_vector)
 
         for cxr in metadata_events: # Loop through each CXR
             try:
                 if cxr.image_path:
-                    image_path = cxr.image_path
-                    image_timestamp = cxr.timestamp
-                    break  # Use first valid image
-            except AttributeError:
-                pass
+                    cxr_image_path = cxr.image_path
+                    cxr_image_timestamp = cxr.timestamp
 
-        # Compute CXR time relative to nearest admission in admissions_to_process
-        # if image_timestamp is not None and admissions_to_process:
-        #     nearest_admission = min(
-        #         admissions_to_process,
-        #         key=lambda a: abs((image_timestamp - a.timestamp).total_seconds()),
-        #     )
-        #     image_hours_from_nearest_admission = (
-        #         (image_timestamp - nearest_admission.timestamp).total_seconds() / 3600.0
-        #     )
+                    # TODO: Consider making this into a utility function
+                    if cxr_image_timestamp is not None and admissions_to_process:
+                        nearest_admission = min(
+                            admissions_to_process,
+                            key=lambda a: abs((cxr_image_timestamp - a.timestamp).total_seconds()),
+                        )
+                        image_hours_from_nearest_admission = (
+                            (cxr_image_timestamp - nearest_admission.timestamp).total_seconds() / 3600.0
+                        )
+
+                    all_cxr_image_paths.append(cxr_image_path)
+                    all_cxr_hours_relative_to_nearest_admission.append(image_hours_from_nearest_admission)
+            except AttributeError:
+                all_cxr_image_paths.append(self.TOKEN_REPRESENTING_MISSING_TEXT)
+                all_cxr_hours_relative_to_nearest_admission.append(self.TOKEN_REPRESENTING_MISSING_FLOAT)
 
         # [Clinical Notes, EHR, Labs]: Process each admission independently (per hadm_id)
         for admission in admissions_to_process:
@@ -667,15 +668,15 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
             if admission_dischtime < admission_time:
                 continue
 
-            discharge_notes = patient.get_events(
+            discharge_notess = patient.get_events(
                 event_type="discharge", filters=[("hadm_id", "==", admission.hadm_id)]
             )
-            radiology_notes = patient.get_events(
+            radiology_notess = patient.get_events(
                 event_type="radiology", filters=[("hadm_id", "==", admission.hadm_id)]
             )
 
             # For all discharge notes in a single admission:
-            for note in discharge_notes: #TODO: Maybe make this into a helper function?
+            for note in discharge_notess: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
                     if note_text:
@@ -686,12 +687,12 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
                         all_discharge_hours_from_admission.append(time_from_admission)
                 except AttributeError: # note object is missing .text or .timestamp attribute (e.g. malformed note)
                     pass
-            if not discharge_notes: # If we get an empty list
+            if not discharge_notess: # If we get an empty list
                 all_discharge_texts.append(self.TOKEN_REPRESENTING_MISSING_TEXT) # Token representing missing text
                 all_discharge_hours_from_admission.append(self.TOKEN_REPRESENTING_MISSING_FLOAT) # Token representing missing time(?)
 
             # For all radiology notes in a single admission:
-            for note in radiology_notes: #TODO: Maybe make this into a helper function?
+            for note in radiology_notess: #TODO: Maybe make this into a helper function?
                 try:
                     note_text = self._clean_text(note.text)
                     if note_text:
@@ -702,7 +703,7 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
                         all_radiology_hours_from_admission.append(time_from_admission)
                 except AttributeError: # note object is missing .text or .timestamp attribute (e.g. malformed note)
                     pass
-            if not radiology_notes: # If we receive empty list
+            if not radiology_notess: # If we receive empty list
                 all_radiology_texts.append(self.TOKEN_REPRESENTING_MISSING_TEXT) # Token representing missing text
                 all_radiology_hours_from_admission.append(self.TOKEN_REPRESENTING_MISSING_FLOAT) # Token representing missing time(?)
 
@@ -783,13 +784,13 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseTask):
 
         single_patient_longitudinal_record = {
                 "patient_id": patient.patient_id,
-                "discharge_note_times": (all_discharge_texts, all_discharge_hours_from_admission),
-                "radiology_note_times": (all_radiology_texts, all_radiology_hours_from_admission),
+                "discharge_notes": (all_discharge_texts, all_discharge_hours_from_admission),
+                "radiology_notes": (all_radiology_texts, all_radiology_hours_from_admission),
                 "icd_codes": (all_icd_inter_admission_hours, all_icd_codes),
                 "labs": (all_lab_hours_from_admission, all_lab_values),
                 "labs_mask": (all_lab_hours_from_admission, all_lab_masks),
-                "image_path": image_path,
-                "negbio_findings": unique_negbio,
+                "image_path": "", # (all_cxr_image_paths, all_cxr_hours_relative_to_nearest_admission)
+                "negbio_findings":[""], # (all_cxr_hours_relative_to_nearest_admission, all_negbio_findings)
                 "mortality": mortality_label,
             }
 
