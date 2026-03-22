@@ -17,6 +17,7 @@ from pyhealth.processors import (
     StageNetTensorProcessor,
     TensorProcessor,
     TimeseriesProcessor,
+    TupleTimeTextProcessor,
 )
 
 from .embedding import EmbeddingModel
@@ -465,14 +466,29 @@ class MultimodalRNN(BaseModel):
 
         self.embedding_model = EmbeddingModel(dataset, embedding_dim)
 
-        # Classify features as sequential or non-sequential
+        # Classify features as text, sequential, or non-sequential.
+        # Text features (TupleTimeTextProcessor) get their own token embedding
+        # table and RNN; they bypass the shared EmbeddingModel.
+        self.text_features = []
         self.sequential_features = []
         self.non_sequential_features = []
 
+        self.text_token_embeddings = nn.ModuleDict()
         self.rnn = nn.ModuleDict()
         for feature_key in self.feature_keys:
             processor = dataset.input_processors[feature_key]
-            if self._is_sequential_processor(processor):
+            if isinstance(processor, TupleTimeTextProcessor):
+                self.text_features.append(feature_key)
+                vocab_size = processor.size()
+                self.text_token_embeddings[feature_key] = nn.Embedding(
+                    vocab_size, embedding_dim, padding_idx=0
+                )
+                self.rnn[feature_key] = RNNLayer(
+                    input_size=embedding_dim,
+                    hidden_size=hidden_dim,
+                    **kwargs,
+                )
+            elif self._is_sequential_processor(processor):
                 self.sequential_features.append(feature_key)
                 # Create RNN for this feature
                 self.rnn[feature_key] = RNNLayer(
@@ -484,8 +500,11 @@ class MultimodalRNN(BaseModel):
                 self.non_sequential_features.append(feature_key)
 
         # Calculate final concatenated dimension
-        final_dim = (len(self.sequential_features) * hidden_dim +
-                     len(self.non_sequential_features) * embedding_dim)
+        final_dim = (
+            len(self.text_features) * hidden_dim +
+            len(self.sequential_features) * hidden_dim +
+            len(self.non_sequential_features) * embedding_dim
+        )
         output_size = self.get_output_size()
         self.fc = nn.Linear(final_dim, output_size)
 
@@ -532,27 +551,56 @@ class MultimodalRNN(BaseModel):
                 - logit: a tensor representing the logits.
                 - embed (optional): a tensor representing the patient embeddings if requested.
         """
-        # Preprocess features
-        inputs = {}
-        masks = {}
-        
-        for feature_key in self.feature_keys:
+        patient_emb = []
+
+        # --- Text features (TupleTimeTextProcessor) ---
+        # Each note is encoded as mean-pooled token embeddings, then an RNN
+        # models the temporal sequence of notes.
+        for feature_key in self.text_features:
             feature = kwargs[feature_key]
             if isinstance(feature, torch.Tensor):
                 feature = (feature,)
-            
+            schema = self.dataset.input_processors[feature_key].schema()
+            input_ids = feature[schema.index("value")].to(self.device)   # (B, N, L)
+            attn_mask = feature[schema.index("mask")].to(self.device)    # (B, N, L)
+
+            batch_size, n_notes, max_length = input_ids.shape
+            # Flatten note dimension for batched token embedding
+            flat_ids  = input_ids.view(batch_size * n_notes, max_length)   # (B*N, L)
+            flat_mask = attn_mask.view(batch_size * n_notes, max_length)   # (B*N, L)
+
+            # Embed tokens and mean-pool within each note
+            token_emb = self.text_token_embeddings[feature_key](flat_ids)  # (B*N, L, E)
+            mask_exp  = flat_mask.unsqueeze(-1).float()                    # (B*N, L, 1)
+            note_emb  = (token_emb * mask_exp).sum(dim=1) / mask_exp.sum(dim=1).clamp(min=1)
+            # (B*N, E) -> (B, N, E)
+            note_emb = note_emb.view(batch_size, n_notes, self.embedding_dim)
+
+            # Note-level mask: a note is valid if it has at least one non-pad token
+            note_mask = attn_mask.any(dim=-1).float()  # (B, N)
+
+            _, last_hidden = self.rnn[feature_key](note_emb, note_mask)
+            patient_emb.append(last_hidden)
+
+        # --- Standard sequential / non-sequential features ---
+        inputs = {}
+        masks = {}
+        for feature_key in self.sequential_features + self.non_sequential_features:
+            feature = kwargs[feature_key]
+            if isinstance(feature, torch.Tensor):
+                feature = (feature,)
+
             schema = self.dataset.input_processors[feature_key].schema()
             value = feature[schema.index("value")] if "value" in schema else None
-            mask = feature[schema.index("mask")] if "mask" in schema else None
-            
+            mask  = feature[schema.index("mask")]  if "mask"  in schema else None
+
             if value is None:
                 raise ValueError(f"Feature '{feature_key}' must contain 'value' in the schema.")
-            
+
             inputs[feature_key] = value
             if mask is not None:
                 masks[feature_key] = mask
 
-        patient_emb = []
         embedded, mask = self.embedding_model(inputs, masks=masks, output_mask=True)
 
         # Process sequential features through RNN
