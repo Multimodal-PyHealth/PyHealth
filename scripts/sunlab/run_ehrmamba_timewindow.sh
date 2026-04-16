@@ -6,7 +6,7 @@ set -euo pipefail
 SEEDS=(267573289 1872967241 706384748)
 TIME_WINDOWS=(24 48 96)
 PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
-USER="wp14"
+USER=""
 
 cd "${PROJECT_DIR}"
 mkdir -p logs
