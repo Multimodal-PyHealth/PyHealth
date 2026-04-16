@@ -14,7 +14,7 @@ mkdir -p logs
 for seed in "${SEEDS[@]}"; do
     for tw in "${TIME_WINDOWS[@]}"; do
         echo "  Launching ehrmamba seed=${seed} time_window=${tw} in tmux"
-        tmux new -s "ehrmamba_${seed}_observationtimewindow_${tw}" -d "bash -lc '
+        tmux new -s "ehrmamba_${seed}_observationtimewindow_${tw}" "bash -lc '
             conda activate pyhealth2 && \
             CUDA_VISIBLE_DEVICES=4 python examples/mortality_prediction/unified_embedding_e2e_mimic4.py \
                 --ehr-root /shared/rsaas/physionet.org/files/mimiciv/2.2 \
