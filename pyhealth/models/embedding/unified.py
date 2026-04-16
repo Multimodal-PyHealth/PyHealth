@@ -214,6 +214,7 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         self.encoders: nn.ModuleDict = nn.ModuleDict()
         self.projections: nn.ModuleDict = nn.ModuleDict()
         self.modality_types: dict[str, ModalityType] = {}
+        self._shared_text_field_by_model: dict[str, str] = {}
 
         for field_name, processor in processors.items():
             if not isinstance(processor, TemporalFeatureProcessor):
@@ -307,6 +308,21 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         embedding_dim: int,
     ) -> None:
         """Build TEXT encoder: BERT + projection, optionally from TextEmbeddingModel."""
+
+        def _set_projection(
+            pre_dim: int, proj_source: Optional[nn.Module] = None
+        ) -> None:
+            if pre_dim != embedding_dim:
+                if proj_source is not None:
+                    self.projections[field_name] = nn.Sequential(
+                        proj_source,
+                        nn.Linear(pre_dim, embedding_dim),
+                    )
+                else:
+                    self.projections[field_name] = nn.Linear(pre_dim, embedding_dim)
+            elif proj_source is not None:
+                self.projections[field_name] = proj_source
+
         if (
             pre_built is not None
             and hasattr(pre_built, "transformer")
@@ -314,23 +330,29 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         ):
             self.encoders[field_name] = pre_built.transformer
             pre_dim = getattr(pre_built, "embedding_dim", embedding_dim)
-            if pre_dim != embedding_dim:
-                self.projections[field_name] = nn.Sequential(
-                    pre_built.fc,
-                    nn.Linear(pre_dim, embedding_dim),
-                )
-            else:
-                self.projections[field_name] = pre_built.fc
+            _set_projection(pre_dim, pre_built.fc)
             return
 
         if processor.is_token():
             from transformers import AutoModel
 
-            bert = AutoModel.from_pretrained(processor.tokenizer_model)
-            self.encoders[field_name] = bert
-            hidden = bert.config.hidden_size
-            if hidden != embedding_dim:
-                self.projections[field_name] = nn.Linear(hidden, embedding_dim)
+            tokenizer_model = getattr(processor, "tokenizer_model", None)
+            if not tokenizer_model:
+                raise ValueError(
+                    f"TEXT processor '{field_name}' is token-based but does not "
+                    "define tokenizer_model."
+                )
+
+            shared_field = self._shared_text_field_by_model.get(tokenizer_model)
+            if shared_field is not None:
+                shared_encoder = self.encoders[shared_field]
+            else:
+                shared_encoder = AutoModel.from_pretrained(tokenizer_model)
+                self._shared_text_field_by_model[tokenizer_model] = field_name
+
+            self.encoders[field_name] = shared_encoder
+            hidden = shared_encoder.config.hidden_size
+            _set_projection(hidden)
         else:
             raise ValueError(
                 f"TEXT processor '{field_name}' must either supply a pre-built "
