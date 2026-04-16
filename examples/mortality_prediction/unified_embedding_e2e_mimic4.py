@@ -299,7 +299,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--task",
         type=str,
-        choices=["stagenet", "icd_labs", "clinical_notes_icd_labs"],
+        choices=["icd_labs", "clinical_notes_icd_labs"],
         default="stagenet",
     )
     parser.add_argument(
