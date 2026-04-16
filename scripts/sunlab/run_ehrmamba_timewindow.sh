@@ -6,7 +6,7 @@ set -euo pipefail
 SEEDS=(267573289 1872967241 706384748)
 TIME_WINDOWS=(24 48 96)
 PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
-USER=""
+USER="wp14"
 
 cd "${PROJECT_DIR}"
 mkdir -p logs
@@ -34,5 +34,3 @@ for seed in "${SEEDS[@]}"; do
         echo "  Launched ehrmamba seed=${seed} time_window=${tw} → tmux session: ehrmamba_${seed}_observationtimewindow_${tw}"
     done
 done
-
-tmux attach -t "ehrmamba_${seed}_observationtimewindow_${tw}"
