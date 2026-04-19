@@ -204,6 +204,10 @@ def run(args: argparse.Namespace) -> Tuple[int, int]:
             optimizer_params={"lr": args.lr},
             monitor=None,
             load_best_model_at_last=False,
+            max_grad_norm=args.max_grad_norm,
+            accumulation_steps=args.grad_accum,
+            use_amp=args.amp,
+            amp_dtype=args.amp_dtype,
         )
         if cuda_device_index is not None:
             torch.cuda.synchronize(cuda_device_index)
@@ -298,6 +302,15 @@ def parse_args() -> argparse.Namespace:
         "--condor",
         action="store_true",
         help="Set device to 'cuda' (no index) for HTCondor GPU jobs.",
+    )
+    parser.add_argument("--grad-accum", type=int, default=1)
+    parser.add_argument("--max-grad-norm", type=float, default=None)
+    parser.add_argument("--amp", action="store_true")
+    parser.add_argument(
+        "--amp-dtype",
+        type=str,
+        default="bf16",
+        choices=["bf16", "fp16"],
     )
     args = parser.parse_args()
 

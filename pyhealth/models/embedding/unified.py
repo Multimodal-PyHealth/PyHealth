@@ -215,6 +215,7 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         self.projections: nn.ModuleDict = nn.ModuleDict()
         self.modality_types: dict[str, ModalityType] = {}
         self._shared_text_field_by_model: dict[str, str] = {}
+        self._text_canonical: dict[str, str] = {}  # field → first field sharing the same tokenizer
 
         for field_name, processor in processors.items():
             if not isinstance(processor, TemporalFeatureProcessor):
@@ -345,12 +346,15 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
 
             shared_field = self._shared_text_field_by_model.get(tokenizer_model)
             if shared_field is not None:
+                # Second+ field with same tokenizer: reuse existing encoder, do NOT
+                # register under a new key (avoids duplicate parameter registration).
+                self._text_canonical[field_name] = shared_field
                 shared_encoder = self.encoders[shared_field]
             else:
                 shared_encoder = AutoModel.from_pretrained(tokenizer_model)
                 self._shared_text_field_by_model[tokenizer_model] = field_name
+                self.encoders[field_name] = shared_encoder
 
-            self.encoders[field_name] = shared_encoder
             hidden = shared_encoder.config.hidden_size
             _set_projection(hidden)
         else:
@@ -455,7 +459,8 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
                 time = torch.zeros(value.shape[:2], device=value.device)
 
             modality = self.modality_types[field_name]
-            encoder = self.encoders[field_name]
+            encoder_key = self._text_canonical.get(field_name, field_name)
+            encoder = self.encoders[encoder_key]
 
             # ── Encode ────────────────────────────────────────────────────
             if modality == ModalityType.CODE:
