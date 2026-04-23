@@ -69,7 +69,7 @@ COMMON=(
     --ehr-root "${EHR_ROOT}"
     --note-root "${NOTE_ROOT}"
     --cache-dir "${CACHE_DIR}"
-    --task clinical_notes_icd_labs
+    --task "${TABLE2_TASK:-clinical_notes_icd_labs}"
     --model "${MODEL}"
     --embedding-dim 128
     --hidden-dim 128
