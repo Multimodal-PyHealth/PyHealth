@@ -2,59 +2,25 @@
 
 Trains and evaluates a unified-embedding model (MLP / RNN / Transformer /
 BottleneckTransformer / EHRMamba / JambaEHR) on MIMIC-IV mortality using
-all four modalities: clinical notes, ICD codes, lab values, and chest X-rays.
-
-This script is the CXR-extended version of unified_embedding_e2e_mimic4.py.
-It adds --cxr-root, --cxr-variant, and the clinical_notes_icd_labs_cxr task
-on top of the existing non-CXR tasks.
-
-VRAM note: CXR embeddings push peak VRAM to ~40 GB. Use a small batch size
-(2-4) and target the largest available GPU (A6000 / H100).
+clinical notes, ICD codes, lab values, and chest X-rays.
 
 Example
 -------
-    # Quick sanity check (--dev + 1 epoch + small batch):
     python examples/mortality_prediction/unified_embedding_e2e_mimic4_cxr.py \\
       --ehr-root /shared/rsaas/physionet.org/files/mimiciv/2.2 \\
       --note-root /shared/rsaas/physionet.org/files/mimic-note \\
       --cxr-root /shared/rsaas/physionet.org/files/MIMIC-CXR \\
       --task clinical_notes_icd_labs_cxr \\
-      --model mlp --quick-test
-
-    # Smoke test (single forward + inference, no training):
-    python examples/mortality_prediction/unified_embedding_e2e_mimic4_cxr.py \\
-      --ehr-root /shared/rsaas/physionet.org/files/mimiciv/2.2 \\
-      --note-root /shared/rsaas/physionet.org/files/mimic-note \\
-      --cxr-root /shared/rsaas/physionet.org/files/MIMIC-CXR \\
-      --task clinical_notes_icd_labs_cxr \\
-      --model mlp --smoke-forward --dev
-
-    # Full training with Transformer + CXR:
-    python examples/mortality_prediction/unified_embedding_e2e_mimic4_cxr.py \\
-      --ehr-root /shared/rsaas/physionet.org/files/mimiciv/2.2 \\
-      --note-root /shared/rsaas/physionet.org/files/mimic-note \\
-      --cxr-root /shared/rsaas/physionet.org/files/MIMIC-CXR \\
-      --task clinical_notes_icd_labs_cxr \\
-      --model transformer --heads 4 --num-layers 2 \\
-      --epochs 10 --batch-size 4 --device cuda:0
-
-    # JambaEHR + CXR:
-    python examples/mortality_prediction/unified_embedding_e2e_mimic4_cxr.py \\
-      --ehr-root /shared/rsaas/physionet.org/files/mimiciv/2.2 \\
-      --note-root /shared/rsaas/physionet.org/files/mimic-note \\
-      --cxr-root /shared/rsaas/physionet.org/files/MIMIC-CXR \\
-      --task clinical_notes_icd_labs_cxr \\
-      --model jambaehr --embedding-dim 128 \\
-      --jamba-transformer-layers 2 --jamba-mamba-layers 6
+      --model ehrmamba --num-layers 2 \\
+      --epochs 10 --batch-size 8 --device cuda:0
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import time
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import torch
@@ -77,35 +43,21 @@ from pyhealth.tasks.multimodal_mimic4 import (
 from pyhealth.trainer import Trainer
 
 
-# ---------------------------------------------------------------------------
-# 1. Dataset construction
-# ---------------------------------------------------------------------------
-
 def _build_base_dataset(args: argparse.Namespace) -> MIMIC4Dataset:
-    """Load the MIMIC-IV base dataset with the appropriate tables.
-
-    For non-CXR tasks this behaves identically to Rian's runner.
-    For the CXR task it additionally passes cxr_root / cxr_variant /
-    cxr_tables so the dataset loads chest X-ray metadata.
-    """
     ehr_tables = ["diagnoses_icd", "procedures_icd", "labevents"]
-
-    # Notes are needed for any task that includes clinical text.
     note_tables = None
+
+    # Notes required for any task that includes clinical text
     if args.task in ("clinical_notes_icd_labs", "clinical_notes_icd_labs_cxr"):
         if not args.note_root:
-            raise ValueError(
-                f"--task {args.task} requires --note-root."
-            )
+            raise ValueError(f"--task {args.task} requires --note-root.")
         note_tables = ["discharge", "radiology"]
 
-    # CXR tables are only loaded for the CXR task.
+    # CXR metadata tables only loaded for the CXR task
     cxr_kwargs = {}
     if args.task == "clinical_notes_icd_labs_cxr":
         if not args.cxr_root:
-            raise ValueError(
-                "--task clinical_notes_icd_labs_cxr requires --cxr-root."
-            )
+            raise ValueError("--task clinical_notes_icd_labs_cxr requires --cxr-root.")
         cxr_kwargs = dict(
             cxr_root=args.cxr_root,
             cxr_variant=args.cxr_variant,
@@ -124,12 +76,7 @@ def _build_base_dataset(args: argparse.Namespace) -> MIMIC4Dataset:
     )
 
 
-# ---------------------------------------------------------------------------
-# 2. Task construction
-# ---------------------------------------------------------------------------
-
 def _build_task(args: argparse.Namespace):
-    """Return the task object matching --task."""
     if args.task == "stagenet":
         return MortalityPredictionStageNetMIMIC4()
     if args.task == "clinical_notes_icd_labs":
@@ -139,28 +86,14 @@ def _build_task(args: argparse.Namespace):
     raise ValueError(f"Unknown task: {args.task}")
 
 
-# ---------------------------------------------------------------------------
-# 3. Train / val / test split
-# ---------------------------------------------------------------------------
-
 def _split_dataset(dataset: Any, seed: int) -> Tuple[Any, Any, Any]:
-    """Split by patient first; fall back to split by sample if empty."""
-    train_ds, val_ds, test_ds = split_by_patient(
-        dataset, [0.8, 0.1, 0.1], seed=seed
-    )
+    train_ds, val_ds, test_ds = split_by_patient(dataset, [0.8, 0.1, 0.1], seed=seed)
     if len(train_ds) == 0 or len(test_ds) == 0:
-        train_ds, val_ds, test_ds = split_by_sample(
-            dataset, [0.8, 0.1, 0.1], seed=seed
-        )
+        train_ds, val_ds, test_ds = split_by_sample(dataset, [0.8, 0.1, 0.1], seed=seed)
     return train_ds, val_ds, test_ds
 
 
-# ---------------------------------------------------------------------------
-# 4. Model construction 
-# ---------------------------------------------------------------------------
-
 def _build_model(args: argparse.Namespace, sample_dataset: Any):
-    """Instantiate UnifiedMultimodalEmbeddingModel + the chosen backbone."""
     unified = UnifiedMultimodalEmbeddingModel(
         processors=sample_dataset.input_processors,
         embedding_dim=args.embedding_dim,
@@ -229,17 +162,12 @@ def _build_model(args: argparse.Namespace, sample_dataset: Any):
     raise ValueError(f"Unknown model: {args.model}")
 
 
-# ---------------------------------------------------------------------------
-# 5. Prediction CSV writer
-# ---------------------------------------------------------------------------
-
 def _write_predictions(
     output_csv: Path,
     patient_ids: list[str],
     y_true: np.ndarray,
     y_prob: np.ndarray,
 ) -> None:
-    """Write per-sample predictions to a CSV file."""
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
     y_true_flat = y_true.reshape(-1).tolist()
@@ -262,21 +190,9 @@ def _write_predictions(
             )
 
 
-# ---------------------------------------------------------------------------
-# 6. Main training + evaluation loop
-# ---------------------------------------------------------------------------
-
 def run(args: argparse.Namespace) -> Path:
-    """Execute the full pipeline: load → task → split → train → evaluate."""
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    total_start = time.perf_counter()
-
-    # Resolve CUDA device index for VRAM tracking.
-    cuda_device_index = None
-    if args.device and args.device.startswith("cuda"):
-        device_index = torch.device(args.device).index
-        cuda_device_index = 0 if device_index is None else device_index
 
     base_dataset = _build_base_dataset(args)
     task = _build_task(args)
@@ -286,18 +202,6 @@ def run(args: argparse.Namespace) -> Path:
         raise RuntimeError(
             "Task produced zero samples. Check roots/tables or adjust settings."
         )
-
-    print(f"Task sample count: {len(sample_dataset)}")
-
-    # Print processor schemas so mismatches are caught early.
-    print("Input processor schemas:")
-    for key in sample_dataset.input_schema.keys():
-        processor = sample_dataset.input_processors.get(key)
-        if processor is None:
-            print(f"  - {key}: <no processor>")
-            continue
-        print(f"  - {key}: {type(processor).__name__}, "
-              f"schema={processor.schema()}")
 
     train_ds, val_ds, test_ds = _split_dataset(sample_dataset, seed=args.seed)
     model = _build_model(args, sample_dataset)
@@ -314,35 +218,6 @@ def run(args: argparse.Namespace) -> Path:
         else None
     )
 
-    print(f"Split sizes: train={len(train_ds)}, val={len(val_ds)}, "
-          f"test={len(test_ds)}")
-
-    # Debug batch diagnostics: print types, shapes, and schema mappings
-    # for the first training batch so processor issues surface immediately.
-    debug_batch = next(iter(train_loader))
-    print("Batch field diagnostics (train batch 0):")
-    for key in sample_dataset.input_schema.keys():
-        processor = sample_dataset.input_processors.get(key)
-        feature = debug_batch.get(key)
-        schema = processor.schema() if processor is not None else ()
-        print(f"  - {key}: type={type(feature).__name__}, schema={schema}")
-
-        if isinstance(feature, tuple):
-            for i, elem in enumerate(feature):
-                shape = getattr(elem, "shape", None)
-                print(f"      tuple[{i}] type={type(elem).__name__} "
-                      f"shape={shape}")
-
-        if processor is not None and isinstance(feature, tuple):
-            for field_name in ("value", "time", "mask"):
-                if field_name in schema:
-                    idx = schema.index(field_name)
-                    if idx < len(feature):
-                        selected = feature[idx]
-                        shape = getattr(selected, "shape", None)
-                        print(f"      schema['{field_name}'] -> tuple[{idx}] "
-                              f"type={type(selected).__name__} shape={shape}")
-
     exp_name = f"{args.model}_seed{args.seed}"
     output_dir = Path(args.output_dir)
 
@@ -355,7 +230,7 @@ def run(args: argparse.Namespace) -> Path:
         exp_name=exp_name,
     )
 
-    # Model-specific optimizer defaults (from Rian's runner).
+    # BT uses tighter optimizer settings to stabilize training on full MIMIC-IV
     effective_lr = args.lr
     effective_max_grad_norm = args.max_grad_norm
     optimizer_params = {}
@@ -365,9 +240,7 @@ def run(args: argparse.Namespace) -> Path:
             effective_lr = 1e-4
         if effective_max_grad_norm is None:
             effective_max_grad_norm = 0.5
-        optimizer_params["eps"] = (
-            args.adam_eps if args.adam_eps is not None else 1e-6
-        )
+        optimizer_params["eps"] = args.adam_eps if args.adam_eps is not None else 1e-6
     else:
         if effective_lr is None:
             effective_lr = 1e-3
@@ -376,17 +249,7 @@ def run(args: argparse.Namespace) -> Path:
 
     optimizer_params["lr"] = effective_lr
 
-    # --smoke-forward: skip training, only run inference to verify the
-    # pipeline works end-to-end without waiting for a full epoch.
-    peak_train_vram_mb = None
-    train_runtime_sec = None
-
-    if not args.smoke_forward and args.epochs > 0 and len(train_ds) > 0:
-        if cuda_device_index is not None:
-            torch.cuda.reset_peak_memory_stats(cuda_device_index)
-            torch.cuda.synchronize(cuda_device_index)
-
-        train_start = time.perf_counter()
+    if args.epochs > 0 and len(train_ds) > 0:
         trainer.train(
             train_dataloader=train_loader,
             val_dataloader=val_loader,
@@ -398,155 +261,86 @@ def run(args: argparse.Namespace) -> Path:
             load_best_model_at_last=True,
         )
 
-        if cuda_device_index is not None:
-            torch.cuda.synchronize(cuda_device_index)
-            peak_train_bytes = torch.cuda.max_memory_allocated(cuda_device_index)
-            peak_train_vram_mb = peak_train_bytes / (1024**2)
-
-        train_runtime_sec = time.perf_counter() - train_start
-
     inference_loader = test_loader or val_loader or train_loader
     y_true, y_prob, _, patient_ids = trainer.inference(
         inference_loader, return_patient_ids=True
     )
-
-    if cuda_device_index is not None:
-        torch.cuda.synchronize(cuda_device_index)
-
-    total_runtime_sec = time.perf_counter() - total_start
-
-    # Benchmark summary — matches the Mamba CXR script's output format.
-    print("Benchmark summary:")
-    print(f"  total_runtime_sec:    {total_runtime_sec:.2f}")
-    if train_runtime_sec is None:
-        print("  training_runtime_sec: N/A (training skipped)")
-        print("  peak_train_vram_mb:   N/A (training skipped)")
-    else:
-        print(f"  training_runtime_sec: {train_runtime_sec:.2f}")
-        if peak_train_vram_mb is None:
-            print("  peak_train_vram_mb:   N/A (non-CUDA device)")
-        else:
-            print(f"  peak_train_vram_mb:   {peak_train_vram_mb:.2f}")
 
     output_csv = output_dir / exp_name / f"predictions_{args.model}.csv"
     _write_predictions(output_csv, patient_ids, y_true, y_prob)
     return output_csv
 
 
-# ---------------------------------------------------------------------------
-# 7. CLI argument parser
-# ---------------------------------------------------------------------------
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run E2E unified embedding on MIMIC-IV (+ CXR) with "
-        "any of six backbone models."
+        description="Run E2E unified embedding on MIMIC-IV + CXR with any of six backbone models."
     )
-
-    # --- Data paths ---
     parser.add_argument("--ehr-root", type=str, required=True)
     parser.add_argument("--note-root", type=str, default=None)
-    parser.add_argument(
-        "--cxr-root", type=str, default=None,
-        help="Root directory for MIMIC-CXR images. Required for "
-        "clinical_notes_icd_labs_cxr task.",
-    )
-    parser.add_argument(
-        "--cxr-variant", type=str, default="sunlab",
-        choices=["default", "sunlab"],
-        help="CXR directory layout variant.",
-    )
+    parser.add_argument("--cxr-root", type=str, default=None)
+    parser.add_argument("--cxr-variant", type=str, default="sunlab", choices=["default", "sunlab"])
     parser.add_argument("--cache-dir", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default="./output/unified_e2e_cxr")
 
-    # --- Task and model selection ---
     parser.add_argument(
         "--task", type=str, default="clinical_notes_icd_labs_cxr",
-        choices=[
-            "stagenet",
-            "clinical_notes_icd_labs",
-            "clinical_notes_icd_labs_cxr",
-        ],
+        choices=["stagenet", "clinical_notes_icd_labs", "clinical_notes_icd_labs_cxr"],
     )
     parser.add_argument(
         "--model", type=str, default="rnn",
-        choices=[
-            "mlp", "rnn", "transformer", "bottleneck_transformer",
-            "ehrmamba", "jambaehr",
-        ],
+        choices=["mlp", "rnn", "transformer", "bottleneck_transformer", "ehrmamba", "jambaehr"],
     )
 
-    # --- Shared embedding / training hyperparameters ---
     parser.add_argument("--embedding-dim", type=int, default=64)
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--epochs", type=int, default=1)
-    parser.add_argument(
-        "--batch-size", type=int, default=4,
-        help="Batch size. Default is 4 (CXR is VRAM-heavy, ~40 GB peak).",
-    )
-    parser.add_argument(
-        "--lr", type=float, default=None,
-        help="Learning rate. Default: 1e-3 (1e-4 for bottleneck_transformer).",
-    )
-    parser.add_argument(
-        "--adam-eps", type=float, default=None,
-        help="Adam epsilon. Default: 1e-8 (1e-6 for bottleneck_transformer).",
-    )
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--adam-eps", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dev", action="store_true")
-    parser.add_argument(
-        "--quick-test", action="store_true",
-        help="Force --dev, 1 epoch, small batch for a quick sanity check.",
-    )
-    parser.add_argument(
-        "--smoke-forward", action="store_true",
-        help="Skip training; only run a single forward pass + inference "
-        "to verify the pipeline end-to-end.",
-    )
 
-    # --- Task-specific ---
     parser.add_argument("--observation-window-hours", type=int, default=24)
 
-    # --- RNN-specific ---
     parser.add_argument("--rnn-type", type=str, default="GRU")
     parser.add_argument("--rnn-layers", type=int, default=1)
     parser.add_argument("--bidirectional", action="store_true")
 
-    # --- Transformer / BottleneckTransformer ---
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--num-layers", type=int, default=2)
 
-    # --- BottleneckTransformer-specific ---
     parser.add_argument("--bottlenecks-n", type=int, default=4)
     parser.add_argument("--fusion-startidx", type=int, default=1)
 
-    # --- Training stability ---
-    parser.add_argument(
-        "--max-grad-norm", type=float, default=None,
-        help="Gradient clip norm. Default: None (0.5 for bottleneck_transformer).",
-    )
+    parser.add_argument("--max-grad-norm", type=float, default=None)
 
-    # --- Mamba / JambaEHR-specific ---
     parser.add_argument("--mamba-state-size", type=int, default=16)
     parser.add_argument("--mamba-conv-kernel", type=int, default=4)
     parser.add_argument("--jamba-transformer-layers", type=int, default=2)
     parser.add_argument("--jamba-mamba-layers", type=int, default=6)
 
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    if args.quick_test:
-        args.dev = True
-        args.epochs = 1
-        args.batch_size = min(args.batch_size, 4)
 
-    return args
+def print_vram_summary(device: Optional[str] = None) -> None:
+    """Print peak allocated and total VRAM for the given CUDA device."""
+    if not torch.cuda.is_available():
+        print("VRAM summary: CUDA not available.")
+        return
+    idx = torch.device(device).index if device and device.startswith("cuda") else 0
+    if idx is None:
+        idx = 0
+    allocated_mb = torch.cuda.max_memory_allocated(idx) / (1024 ** 2)
+    total_mb = torch.cuda.get_device_properties(idx).total_memory / (1024 ** 2)
+    print(f"VRAM summary (cuda:{idx}): peak_allocated={allocated_mb:.0f} MB / total={total_mb:.0f} MB")
 
 
 if __name__ == "__main__":
     args = parse_args()
     output_csv_path = run(args)
     print(f"Saved predictions to: {output_csv_path}")
+    print_vram_summary(args.device)
