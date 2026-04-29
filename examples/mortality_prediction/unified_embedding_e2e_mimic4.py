@@ -10,6 +10,10 @@ Tasks
     MortalityPredictionStageNetMIMIC4: ICD codes + 10-dim lab vectors,
     patient-level samples aggregated across all admissions.
 
+--task icd_labs
+    ICDLabsMIMIC4: ICD codes + 10-dim lab vectors via the unified
+    multimodal pipeline.  No notes required.
+
 --task clinical_notes_icd_labs
     ClinicalNotesICDLabsMIMIC4: discharge/radiology notes + ICD + labs.
     Requires --note-root.  Legacy; ICD codes are discharge-coded (leakage).
@@ -89,20 +93,6 @@ def _build_base_dataset(args: argparse.Namespace) -> MIMIC4Dataset:
 
     if args.task == "icd_labs":
         ehr_tables = ["diagnoses_icd", "procedures_icd", "labevents"]
-
-    if args.task == "notes_labs":
-        if not args.note_root:
-            raise ValueError("--task notes_labs requires --note-root.")
-        note_tables = ["discharge"]
-        # Load ICD tables only when explicitly requested (they are discharge-coded).
-        ehr_tables = (
-            ["diagnoses_icd", "procedures_icd", "labevents"]
-            if args.icd_codes
-            else ["labevents"]
-        )
-        if args.include_vitals:
-            if "chartevents" not in ehr_tables:
-                ehr_tables.append("chartevents")
 
     return MIMIC4Dataset(
         ehr_root=args.ehr_root,
@@ -379,7 +369,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--task",
         type=str,
-        choices=["stagenet", "icd_labs", "clinical_notes_icd_labs", "notes_labs"],
+        choices=["stagenet", "icd_labs", "clinical_notes_icd_labs"],
         default="stagenet",
         help=(
             "notes_labs: admission-context text (CC/HPI/PMH/MedsOnAdm) + labs. "
