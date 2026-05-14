@@ -1077,3 +1077,66 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
             record["icd_codes"] = (all_icd_times, all_icd_codes)
 
         return [record]
+
+
+class LabsOnlyMIMIC4(BaseMultimodalMIMIC4Task):
+    """EHR-only mortality prediction using lab values — no notes, no ICD codes.
+
+    Serves as the structured-EHR reference baseline for multimodal ablations.
+    Collecting only ``labevents`` keeps the dataset loader fast and avoids any
+    leakage from discharge-coded ICD tables.
+
+    Schema mirrors the ``labs`` / ``labs_mask`` fields from ``NotesLabsMIMIC4``
+    so the same backbone models (MLP, RNN, Transformer, etc.) work unchanged.
+
+    Args:
+        window_hours: Hours from admission to collect lab measurements.
+            ``None`` collects for the full admission span. Default: 24.
+    """
+
+    PADDING: int = 0
+
+    task_name: str = "LabsOnlyMIMIC4"
+
+    input_schema: ClassVar[Dict] = {
+        "labs": ("stagenet_tensor", {}),
+        "labs_mask": ("stagenet_tensor", {}),
+    }
+    output_schema: ClassVar[Dict] = {"mortality": "binary"}
+
+    def __init__(self, window_hours: Optional[float] = 24) -> None:
+        super().__init__()
+        self.window_hours = window_hours
+
+    def __call__(self, patient: Any) -> List[Dict[str, Any]]:  # type: ignore[override]
+        admissions = self._build_admissions_to_process(patient)
+        if not admissions:
+            return []
+
+        for admission_time, admission_dischtime, admission in admissions:
+            mortality_label = self._get_mortality_label(patient, admission)
+            effective_start, effective_end = self._compute_window(
+                admission_time, admission_dischtime, self.window_hours
+            )
+
+            lab_times, lab_values, lab_masks = self._collect_labs(
+                patient=patient,
+                admission_time=admission_time,
+                end_time=effective_end,
+            )
+
+            if len(lab_values) == 0:
+                lab_values.append(
+                    [self.MISSING_FLOAT_TOKEN] * len(self.LAB_CATEGORY_NAMES)
+                )
+                lab_masks.append([False] * len(self.LAB_CATEGORY_NAMES))
+                lab_times.append(self.MISSING_FLOAT_TOKEN)
+
+            yield {
+                "patient_id": patient.patient_id,
+                "labs": (lab_times, lab_values),
+                "labs_mask": (lab_times, lab_masks),
+                "mortality": mortality_label,
+                "window_start": effective_start,
+                "window_end": effective_end,
+            }
