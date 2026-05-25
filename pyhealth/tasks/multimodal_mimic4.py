@@ -82,15 +82,7 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         "summary"
     ]
 
-    def __init__(
-        self,
-        window_hours: Optional[float] = None,
-    ):
-        self.window_hours = window_hours
-
-    # Discharge notes: admission-context sections (clinically available at
-    # admission time). Headers are lowercased before matching.
-    _DISCHARGE_SECTION_TARGETS: ClassVar[frozenset] = frozenset({
+    DISCHARGE_CLINICAL_HEADERS: ClassVar[List[str]] = [
         "chief complaint",
         "history of present illness",
         "hpi",
@@ -105,7 +97,13 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         "family history",
         "allergies",
         "review of systems",
-    })
+    ]
+
+    def __init__(
+        self,
+        window_hours: Optional[float] = None,
+    ):
+        self.window_hours = window_hours
 
     # Matches a line that is purely a section header: words + colon + nothing else.
     # E.g. "Chief Complaint:", "Past Medical History:", "IMPRESSION:".
