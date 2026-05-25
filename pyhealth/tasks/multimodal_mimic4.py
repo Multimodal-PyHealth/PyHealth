@@ -69,19 +69,6 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         item for itemids in VITAL_CATEGORIES.values() for item in itemids
     ]
 
-    RADIOLOGY_CLINICAL_HEADERS: ClassVar[List[str]] = [
-        "impression",
-        "findings",
-        "clinical indication",
-        "indication",
-        "clinical history",
-        "history",
-        "comparison",
-        "technique",
-        "conclusion",
-        "summary",
-    ]
-
     def __init__(
         self,
         window_hours: Optional[float] = None,
@@ -105,6 +92,20 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         "family history",
         "allergies",
         "review of systems",
+    })
+
+    # Radiology notes: diagnostic findings sections.
+    _RADIOLOGY_SECTION_TARGETS: ClassVar[frozenset] = frozenset({
+        "impression",
+        "findings",
+        "clinical indication",
+        "indication",
+        "clinical history",
+        "history",
+        "comparison",
+        "technique",
+        "conclusion",
+        "summary",
     })
 
     # Matches a line that is purely a section header: words + colon + nothing else.
