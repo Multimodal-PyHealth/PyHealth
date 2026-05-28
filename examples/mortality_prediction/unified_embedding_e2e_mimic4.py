@@ -64,9 +64,11 @@ import torch
 from pyhealth.datasets import (
     MIMIC4Dataset,
     get_dataloader,
+    sample_balanced,
+    sample_oversample,
+    sample_weighted,
     split_by_patient,
     split_by_sample,
-    sample_balanced,
 )
 from pyhealth.models import MLP, RNN, Transformer, UnifiedMultimodalEmbeddingModel
 from pyhealth.models.bottleneck_transformer import BottleneckTransformer
@@ -262,12 +264,28 @@ def run(args: argparse.Namespace) -> Path:
 
     label_key = list(sample_dataset.output_schema.keys())[0]
 
-    # Balanced sampling: undersample negatives to achieve a target pos:neg ratio.
-    if args.balanced_sampling:
+    # Resolve effective sampling strategy.
+    # --balanced-sampling / --balanced-ratio are legacy aliases for undersample.
+    strategy = args.sampling_strategy
+    if args.balanced_sampling and strategy == "none":
+        strategy = "undersample"
+
+    if strategy == "undersample":
         ratio = args.balanced_ratio
-        print(f"[balanced_sampling] Undersampling training set to pos:neg ratio 1:{ratio}")
+        print(f"[sampling] Undersampling negatives -> pos:neg 1:{ratio}")
         train_ds = sample_balanced(train_ds, ratio=ratio, seed=args.seed, label_key=label_key)
-        print(f"[balanced_sampling] Training set size after sampling: {len(train_ds)}")
+        print(f"[sampling] Training size after undersample: {len(train_ds)}")
+
+    elif strategy == "oversample":
+        ratio = args.balanced_ratio
+        print(f"[sampling] Oversampling positives -> pos:neg 1:{ratio}")
+        train_ds = sample_oversample(train_ds, ratio=ratio, seed=args.seed, label_key=label_key)
+        print(f"[sampling] Training size after oversample: {len(train_ds)}")
+
+    elif strategy == "weighted":
+        print("[sampling] Weighted resampling (class-proportional, with replacement)")
+        train_ds = sample_weighted(train_ds, seed=args.seed, label_key=label_key)
+        print(f"[sampling] Training size after weighted resample: {len(train_ds)}")
 
     model = _build_model(args, sample_dataset)
 
@@ -487,7 +505,21 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help=(
             "Negatives per positive in the balanced training set. "
-            "Default: 1.0 (equal pos/neg). Only used with --balanced-sampling."
+            "Default: 1.0 (equal pos/neg). Used with undersample and oversample strategies."
+        ),
+    )
+    parser.add_argument(
+        "--sampling-strategy",
+        type=str,
+        default="none",
+        choices=["none", "undersample", "oversample", "weighted"],
+        help=(
+            "Training-set class balance strategy. "
+            "'none': no resampling (default). "
+            "'undersample': drop majority-class (neg) samples via sample_balanced(). "
+            "'oversample': duplicate minority-class (pos) samples via sample_oversample(). "
+            "'weighted': class-proportional resampling w/ replacement via sample_weighted(). "
+            "--balanced-sampling is a legacy alias for 'undersample'."
         ),
     )
 
