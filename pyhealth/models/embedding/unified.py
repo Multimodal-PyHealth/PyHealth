@@ -206,9 +206,11 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         image_channels: int = 3,
         patch_size: int = 16,
         field_embeddings: Optional[dict[str, Any]] = None,
+        freeze_text_encoder: bool = False,
     ):
         super().__init__()
         self._embedding_dim = embedding_dim
+        self._freeze_text_encoder = freeze_text_encoder
         _field_embeddings = field_embeddings or {}
 
         self.encoders: nn.ModuleDict = nn.ModuleDict()
@@ -235,7 +237,8 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
 
             elif m == ModalityType.TEXT:
                 self._build_text_encoder(
-                    field_name, processor, pre_built, embedding_dim
+                    field_name, processor, pre_built, embedding_dim,
+                    freeze=freeze_text_encoder,
                 )
 
             elif m == ModalityType.IMAGE:
@@ -305,6 +308,7 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         processor: TemporalFeatureProcessor,
         pre_built: Any,
         embedding_dim: int,
+        freeze: bool = False,
     ) -> None:
         """Build TEXT encoder: BERT + projection, optionally from TextEmbeddingModel."""
         if (
@@ -313,6 +317,9 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
             and hasattr(pre_built, "fc")
         ):
             self.encoders[field_name] = pre_built.transformer
+            if freeze:
+                for p in pre_built.transformer.parameters():
+                    p.requires_grad = False
             pre_dim = getattr(pre_built, "embedding_dim", embedding_dim)
             if pre_dim != embedding_dim:
                 self.projections[field_name] = nn.Sequential(
@@ -327,6 +334,9 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
             from transformers import AutoModel
 
             bert = AutoModel.from_pretrained(processor.tokenizer_model)
+            if freeze:
+                for p in bert.parameters():
+                    p.requires_grad = False
             self.encoders[field_name] = bert
             hidden = bert.config.hidden_size
             if hidden != embedding_dim:
