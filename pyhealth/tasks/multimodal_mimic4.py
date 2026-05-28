@@ -70,13 +70,28 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         item for itemids in VITAL_CATEGORIES.values() for item in itemids
     ]
 
+    RADIOLOGY_CLINICAL_HEADERS: ClassVar[List[str]] = [
+        "impression",
+        "findings",
+        "clinical indication",
+        "indication",
+        "clinical history",
+        "history",
+        "comparison",
+        "technique",
+        "conclusion",
+        "summary",
+    ]
+
     def __init__(
         self,
         window_hours: Optional[float] = None,
     ):
         self.window_hours = window_hours
 
-    _ADMISSION_SECTION_TARGETS: ClassVar[frozenset] = frozenset({
+    # Discharge notes: admission-context sections (clinically available at
+    # admission time). Headers are lowercased before matching.
+    _DISCHARGE_SECTION_TARGETS: ClassVar[frozenset] = frozenset({
         "chief complaint",
         "history of present illness",
         "hpi",
@@ -87,10 +102,14 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         "medications on admission",
         "admission medications",
         "home medications",
+        "social history",
+        "family history",
+        "allergies",
+        "review of systems",
     })
 
     # Matches a line that is purely a section header: words + colon + nothing else.
-    # E.g. "Chief Complaint:", "Past Medical History:", "HPI:".
+    # E.g. "Chief Complaint:", "Past Medical History:", "IMPRESSION:".
     _SECTION_HEADER_RE: ClassVar[re.Pattern] = re.compile(
         r"^\s*([A-Za-z][A-Za-z\s,/\-\.]{1,60}?)\s*:\s*$"
     )
@@ -101,17 +120,11 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         return text if text else None
 
     @staticmethod
-    def _extract_admission_sections(text: str) -> str:
-        """Extract admission-context sections from a MIMIC-IV discharge note.
-
-        Parses Chief Complaint, HPI, Past Medical History, and Medications on
-        Admission sections — information clinically available at admission time.
-        Falls back to the first 1 024 characters if no target sections are found.
-        """
+    def _parse_note_sections(text: str) -> Dict[str, str]:
+        """Split a note into {lowercased_header: content_text} pairs."""
         sections: Dict[str, str] = {}
         current_key: Optional[str] = None
         current_lines: List[str] = []
-
         for line in text.split("\n"):
             m = BaseMultimodalMIMIC4Task._SECTION_HEADER_RE.match(line)
             if m:
@@ -121,13 +134,33 @@ class BaseMultimodalMIMIC4Task(BaseTask):
                 current_lines = []
             elif current_key is not None:
                 current_lines.append(line)
-
         if current_key is not None:
             sections[current_key] = "\n".join(current_lines).strip()
+        return sections
 
-        targets = BaseMultimodalMIMIC4Task._ADMISSION_SECTION_TARGETS
+    @staticmethod
+    def extract_note_sections(text: str, note_type: str = "discharge") -> str:
+        """Extract clinically relevant sections from a MIMIC-IV note.
+
+        Routes to the appropriate target set based on note type. Falls back to
+        the first 1024 characters when no target sections are present.
+
+        Args:
+            text: Raw note text.
+            note_type: ``"discharge"`` (default) or ``"radiology"``.
+        """
+        if note_type == "radiology":
+            targets = BaseMultimodalMIMIC4Task._RADIOLOGY_SECTION_TARGETS
+        else:
+            targets = BaseMultimodalMIMIC4Task._DISCHARGE_SECTION_TARGETS
+        sections = BaseMultimodalMIMIC4Task._parse_note_sections(text)
         extracted = [v for k, v in sections.items() if k in targets and v]
         return " [SEP] ".join(extracted) if extracted else text[:1024]
+
+    @staticmethod
+    def _extract_admission_sections(text: str) -> str:
+        """Backward-compatible alias; extracts discharge note sections."""
+        return BaseMultimodalMIMIC4Task.extract_note_sections(text, note_type="discharge")
 
     def _collect_admission_note_sections(
         self,
