@@ -84,19 +84,19 @@ class BaseMultimodalMIMIC4Task(BaseTask):
 
     DISCHARGE_CLINICAL_HEADERS: ClassVar[List[str]] = [
         "chief complaint",
-        "history of present illness",
-        "hpi",
-        "past medical history",
-        "past medical and surgical history",
-        "past medical/surgical history",
-        "past surgical history",
-        "medications on admission",
-        "admission medications",
-        "home medications",
-        "social history",
-        "family history",
-        "allergies",
-        "review of systems",
+        # "history of present illness",
+        # "hpi",
+        # "past medical history",
+        # "past medical and surgical history",
+        # "past medical/surgical history",
+        # "past surgical history",
+        # "medications on admission",
+        # "admission medications",
+        # "home medications",
+        # "social history",
+        # "family history",
+        # "allergies",
+        # "review of systems",
     ]
 
     def __init__(
@@ -104,12 +104,6 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         window_hours: Optional[float] = None,
     ):
         self.window_hours = window_hours
-
-    # Matches a line that is purely a section header: words + colon + nothing else.
-    # E.g. "Chief Complaint:", "Past Medical History:", "IMPRESSION:".
-    _SECTION_HEADER_RE: ClassVar[re.Pattern] = re.compile(
-        r"^\s*([A-Za-z][A-Za-z\s,/\-\.]{1,60}?)\s*:\s*$"
-    )
 
     @staticmethod
     def _clean_text(text: Optional[str]) -> Optional[str]:
@@ -119,80 +113,14 @@ class BaseMultimodalMIMIC4Task(BaseTask):
     @staticmethod
     def _parse_note_sections(text: str) -> Dict[str, str]:
         """Split a note into {lowercased_header: content_text} pairs."""
-        sections: Dict[str, str] = {}
-        current_key: Optional[str] = None
-        current_lines: List[str] = []
-        for line in text.split("\n"):
-            m = BaseMultimodalMIMIC4Task._SECTION_HEADER_RE.match(line)
-            if m:
-                if current_key is not None:
-                    sections[current_key] = "\n".join(current_lines).strip()
-                current_key = m.group(1).strip().lower()
-                current_lines = []
-            elif current_key is not None:
-                current_lines.append(line)
-        if current_key is not None:
-            sections[current_key] = "\n".join(current_lines).strip()
-        return sections
-
-    @staticmethod
-    def extract_note_sections(text: str, note_type: str = "discharge") -> str:
-        """Extract clinically relevant sections from a MIMIC-IV note.
-
-        Routes to the appropriate target set based on note type. Falls back to
-        the first 1024 characters when no target sections are present.
-
-        Args:
-            text: Raw note text.
-            note_type: ``"discharge"`` (default) or ``"radiology"``.
-        """
-        if note_type == "radiology":
-            targets = BaseMultimodalMIMIC4Task._RADIOLOGY_SECTION_TARGETS
-        else:
-            targets = BaseMultimodalMIMIC4Task._DISCHARGE_SECTION_TARGETS
-        sections = BaseMultimodalMIMIC4Task._parse_note_sections(text)
-        extracted = [v for k, v in sections.items() if k in targets and v]
-        return " [SEP] ".join(extracted) if extracted else text[:1024]
-
-    @staticmethod
-    def _extract_admission_sections(text: str) -> str:
-        """Backward-compatible alias; extracts discharge note sections."""
-        return BaseMultimodalMIMIC4Task.extract_note_sections(text, note_type="discharge")
-
-    def _collect_admission_note_sections(
-        self,
-        patient: Any,
-        hadm_id: Any,
-        admission_time: datetime,
-    ) -> Tuple[List[str], List[float]]:
-        """Collect admission-context text from the discharge note.
-
-        No time filter is applied because the target sections (CC, HPI, PMH,
-        Medications on Admission) describe the patient's state *at admission*
-        regardless of when the note was finalised. Returned timestamps are 0.0
-        so downstream models treat the text as admission-time context.
-        """
-        notes = patient.get_events(
-            event_type="discharge",
-            filters=[("hadm_id", "==", hadm_id)],
+        section_re = re.compile(
+            r"^\s*([A-Za-z][A-Za-z \t,/\-\.]{1,60}?)\s*:\s*\n(.*?)(?=^\s*[A-Za-z][A-Za-z \t,/\-\.]{1,60}?\s*:\s*$|\Z)",
+            re.MULTILINE | re.DOTALL,
         )
-
-        texts: List[str] = []
-        for note in notes:
-            try:
-                raw = note.text
-                if not raw:
-                    continue
-                extracted = self._extract_admission_sections(raw)
-                if extracted:
-                    texts.append(extracted)
-            except AttributeError:
-                pass
-
-        if not texts:
-            return [self.MISSING_TEXT_TOKEN], [self.MISSING_FLOAT_TOKEN]
-
-        return texts, [0.0] * len(texts)
+        return {
+            m.group(1).strip().lower(): m.group(2).strip()
+            for m in section_re.finditer(text)
+        }
 
     @staticmethod
     def _parse_datetime(value: Any) -> Optional[datetime]:
@@ -455,6 +383,7 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         admission_time: datetime,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
+        section_headers: Optional[List[str]] = None,
     ) -> Tuple[List[str], List[float]]:
         """Collect notes of a given type for one admission.
 
@@ -463,8 +392,11 @@ class BaseMultimodalMIMIC4Task(BaseTask):
             note_event_type: Event type string (e.g. "discharge", "radiology").
             hadm_id: Admission ID to filter by.
             admission_time: Admission start time; used to compute time offsets.
-            start_time: Optional start of the time window
-            end_time: Optional end of the time window
+            start_time: Optional start of the time window.
+            end_time: Optional end of the time window.
+            section_headers: When provided, extract only these named sections
+                from each note (lowercased match against parsed headers). Falls
+                back to the full note text when no matching sections are found.
 
         Returns:
             Tuple of (texts, hours_from_admission). Falls back to
@@ -484,6 +416,10 @@ class BaseMultimodalMIMIC4Task(BaseTask):
             try:
                 note_text = self._clean_text(note.text)
                 if note_text:
+                    if section_headers is not None:
+                        parsed = self._parse_note_sections(note_text)
+                        extracted = [f"{k}: {v}" for k, v in parsed.items() if k in section_headers and v]
+                        note_text = " [SEP] ".join(extracted) if extracted else note_text
                     time_from_admission = self._to_hours(
                         (note.timestamp - admission_time).total_seconds()
                     )
@@ -494,12 +430,6 @@ class BaseMultimodalMIMIC4Task(BaseTask):
             ):  # note object is missing .text or .timestamp attribute (e.g. malformed note)
                 pass
 
-        if (
-            not notes or not texts
-        ):  # If we get an empty list or all notes were malformed
-            return [self.MISSING_TEXT_TOKEN], [
-                self.MISSING_FLOAT_TOKEN
-            ]  # Token representing missing text/time
         return texts, note_times
 
 
@@ -580,6 +510,7 @@ class ClinicalNotesMIMIC4(BaseMultimodalMIMIC4Task):
                 admission_time,
                 start_time=effective_start,
                 end_time=effective_end,
+                section_headers=self.DISCHARGE_CLINICAL_HEADERS,
             )
             all_discharge_texts.extend(discharge_texts)
             all_discharge_times_from_admission.extend(discharge_times)
@@ -591,9 +522,17 @@ class ClinicalNotesMIMIC4(BaseMultimodalMIMIC4Task):
                 admission_time,
                 start_time=effective_start,
                 end_time=effective_end,
+                section_headers=self.RADIOLOGY_CLINICAL_HEADERS,
             )
             all_radiology_texts.extend(radiology_texts)
             all_radiology_times_from_admission.extend(radiology_times)
+
+        if not all_discharge_texts:
+            all_discharge_texts = [self.MISSING_TEXT_TOKEN]
+            all_discharge_times_from_admission = [self.MISSING_FLOAT_TOKEN]
+        if not all_radiology_texts:
+            all_radiology_texts = [self.MISSING_TEXT_TOKEN]
+            all_radiology_times_from_admission = [self.MISSING_FLOAT_TOKEN]
 
         discharge_note_times_from_admission = (
             all_discharge_texts,
@@ -728,6 +667,7 @@ class ClinicalNotesICDLabsMIMIC4(BaseMultimodalMIMIC4Task):
                 admission_time,
                 start_time=effective_start,
                 end_time=effective_end,
+                section_headers=self.DISCHARGE_CLINICAL_HEADERS,
             )
             all_discharge_texts.extend(discharge_texts)
             all_discharge_times_from_admission.extend(discharge_times)
@@ -739,6 +679,7 @@ class ClinicalNotesICDLabsMIMIC4(BaseMultimodalMIMIC4Task):
                 admission_time,
                 start_time=effective_start,
                 end_time=effective_end,
+                section_headers=self.RADIOLOGY_CLINICAL_HEADERS,
             )
             all_radiology_texts.extend(radiology_texts)
             all_radiology_times_from_admission.extend(radiology_times)
@@ -776,6 +717,13 @@ class ClinicalNotesICDLabsMIMIC4(BaseMultimodalMIMIC4Task):
             )
             all_lab_masks.append([False] * len(self.LAB_CATEGORY_NAMES))
             all_lab_times.append(self.MISSING_FLOAT_TOKEN)
+
+        if not all_discharge_texts:
+            all_discharge_texts = [self.MISSING_TEXT_TOKEN]
+            all_discharge_times_from_admission = [self.MISSING_FLOAT_TOKEN]
+        if not all_radiology_texts:
+            all_radiology_texts = [self.MISSING_TEXT_TOKEN]
+            all_radiology_times_from_admission = [self.MISSING_FLOAT_TOKEN]
 
         discharge_note_times_from_admission = (
             all_discharge_texts,
@@ -1023,9 +971,12 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
             if admission_dischtime < admission_time:
                 admission_dischtime = admission_time
 
-            # Admission-context sections — no time window applied to notes
-            note_texts, note_times = self._collect_admission_note_sections(
-                patient, admission.hadm_id, admission_time
+            note_texts, note_times = self._collect_notes(
+                patient,
+                "discharge",
+                admission.hadm_id,
+                admission_time,
+                section_headers=self.DISCHARGE_CLINICAL_HEADERS,
             )
             all_note_texts.extend(note_texts)
             all_note_times.extend(note_times)
@@ -1086,6 +1037,10 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
             )
             all_vital_masks.append([False] * len(self.VITAL_CATEGORY_NAMES))
             all_vital_times.append(self.MISSING_FLOAT_TOKEN)
+
+        if not all_note_texts:
+            all_note_texts = [self.MISSING_TEXT_TOKEN]
+            all_note_times = [self.MISSING_FLOAT_TOKEN]
 
         record: Dict[str, Any] = {
             "patient_id": patient.patient_id,
