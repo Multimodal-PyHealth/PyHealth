@@ -70,16 +70,15 @@ class BaseMultimodalMIMIC4Task(BaseTask):
     ]
 
     RADIOLOGY_CLINICAL_HEADERS: ClassVar[List[str]] = [
-        "impression",
-        "findings",
-        "clinical indication",
         "indication",
-        "clinical history",
-        "history",
-        "comparison",
-        "technique",
-        "conclusion",
-        "summary"
+        "impression",
+        # "findings",
+        # "clinical history",
+        # "history",
+        # "comparison",
+        # "technique",
+        # "conclusion",
+        # "summary"
     ]
 
     DISCHARGE_CLINICAL_HEADERS: ClassVar[List[str]] = [
@@ -111,15 +110,19 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         return text if text else None
 
     @staticmethod
-    def _parse_note_sections(text: str) -> Dict[str, str]:
+    def _parse_note_sections(text: str, note_type: str) -> Dict[str, str]:
         """Split a note into {lowercased_header: content_text} pairs."""
-        section_re = re.compile(
-            r"^\s*([A-Za-z][A-Za-z \t,/\-\.]{1,60}?)\s*:\s*\n(.*?)(?=^\s*[A-Za-z][A-Za-z \t,/\-\.]{1,60}?\s*:\s*$|\Z)",
-            re.MULTILINE | re.DOTALL,
-        )
+        ext_text = text + '\n\n'
+        if note_type == "radiology":
+            section_re = re.compile(r'([a-zA-Z ]+):[ \t\n]+(.+?)\n{2,}', re.DOTALL)
+        elif note_type == "discharge":
+            section_re = re.compile(r'([a-zA-Z ]+):\n+(.+?)\n{2,}', re.DOTALL)
+        else:
+            raise ValueError(f"Note Type '{note_type}' not supported.")
         return {
             m.group(1).strip().lower(): m.group(2).strip()
-            for m in section_re.finditer(text)
+            for m in section_re.finditer(ext_text)
+            if m.end() - m.start() > 0
         }
 
     @staticmethod
@@ -384,6 +387,7 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         section_headers: Optional[List[str]] = None,
+        fallback_to_full_note: bool = False,
     ) -> Tuple[List[str], List[float]]:
         """Collect notes of a given type for one admission.
 
@@ -395,8 +399,10 @@ class BaseMultimodalMIMIC4Task(BaseTask):
             start_time: Optional start of the time window.
             end_time: Optional end of the time window.
             section_headers: When provided, extract only these named sections
-                from each note (lowercased match against parsed headers). Falls
-                back to the full note text when no matching sections are found.
+                from each note (lowercased match against parsed headers).
+            fallback_to_full_note: When True (default), falls back to the full
+                note text if no matching sections are found. When False, notes
+                with no matching sections are dropped entirely.
 
         Returns:
             Tuple of (texts, hours_from_admission). Falls back to
@@ -417,9 +423,13 @@ class BaseMultimodalMIMIC4Task(BaseTask):
                 note_text = self._clean_text(note.text)
                 if note_text:
                     if section_headers is not None:
-                        parsed = self._parse_note_sections(note_text)
+                        parsed = self._parse_note_sections(note_text, note_type=note_event_type)
                         extracted = [f"{k}: {v}" for k, v in parsed.items() if k in section_headers and v]
-                        note_text = " [SEP] ".join(extracted) if extracted else note_text
+                        if extracted:
+                            note_text = " [SEP] ".join(extracted)
+                        elif not fallback_to_full_note:
+                            continue
+
                     time_from_admission = self._to_hours(
                         (note.timestamp - admission_time).total_seconds()
                     )
