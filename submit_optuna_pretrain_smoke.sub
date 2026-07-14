@@ -1,0 +1,18 @@
+universe = vanilla
+executable = run_htcondor_optuna_pretrain.sh
+output = /shared/rsaas/rianatri/ssl/logs/htcondor_optuna_pt_smoke.$(Cluster).$(Process).out
+error = /shared/rsaas/rianatri/ssl/logs/htcondor_optuna_pt_smoke.$(Cluster).$(Process).err
+log = /shared/rsaas/rianatri/ssl/logs/htcondor_optuna_pt_smoke.$(Cluster).$(Process).log
+
+request_cpus = 8
+request_memory = 48GB
+request_disk = 40GB
+request_gpus = 1
+
+# Tiny end-to-end smoke: 1 study (mamba/mae), 2 trials, 1 epoch, 2% pool, own
+# output dir so it never touches the real pt_*.db. ~15-30 min.
+environment = "OPTUNA_ARCHS=mamba OPTUNA_METHODS=mae OPTUNA_NTRIALS=2 OPTUNA_EPOCHS=1 OPTUNA_SUBSET_FRAC=0.02 OPTUNA_TIMEOUT=1800 OPTUNA_NGPU=1 OPTUNA_OUT=/shared/rsaas/rianatri/ssl/optuna_pretrain_smoke"
+
+requirements = (Machine == "sunlab-c02.cs.illinois.edu")
+
+queue
