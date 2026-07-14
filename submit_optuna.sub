@@ -1,0 +1,15 @@
+universe = vanilla
+executable = run_htcondor_optuna.sh
+output = /shared/rsaas/rianatri/ssl/logs/htcondor_optuna.$(Cluster).$(Process).out
+error = /shared/rsaas/rianatri/ssl/logs/htcondor_optuna.$(Cluster).$(Process).err
+log = /shared/rsaas/rianatri/ssl/logs/htcondor_optuna.$(Cluster).$(Process).log
+
+request_cpus = 24
+request_memory = 96GB
+request_disk = 60GB
+request_gpus = 4
+
+# Same node as the running pretrain job (8 GPUs total; 3 used by pretrain, 4 here).
+requirements = (Machine == "sunlab-c02.cs.illinois.edu")
+
+queue

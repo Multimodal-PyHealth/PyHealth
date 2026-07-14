@@ -1,0 +1,16 @@
+universe = vanilla
+executable = run_htcondor_optuna_pretrain.sh
+output = /shared/rsaas/rianatri/ssl/logs/htcondor_optuna_pt.$(Cluster).$(Process).out
+error = /shared/rsaas/rianatri/ssl/logs/htcondor_optuna_pt.$(Cluster).$(Process).err
+log = /shared/rsaas/rianatri/ssl/logs/htcondor_optuna_pt.$(Cluster).$(Process).log
+
+request_cpus = 30
+request_memory = 120GB
+request_disk = 80GB
+request_gpus = 5
+
+# c02 has 8x RTX 6000 Ada (48 GB). 5 GPUs here; 9 studies (3 arch x 3 method)
+# run 5-at-a-time in two waves.
+requirements = (Machine == "sunlab-c02.cs.illinois.edu")
+
+queue
