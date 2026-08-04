@@ -1,0 +1,11 @@
+_inherit: base.yaml
+
+method: vjepa
+task: notes_labs
+# More, multi-scale blocks for the longer multimodal sequence; prefer windows
+# that span both labs and notes so the model learns cross-modal prediction.
+num_target_blocks: 6
+target_block_scales: [2, 4, 8, 16]
+require_multimodal_blocks: true
+normalize_targets: true
+output_dir: ./output/pretrain/vjepa_notes_labs

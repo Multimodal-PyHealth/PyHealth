@@ -1,0 +1,70 @@
+# Base config for SSL pretraining on unified multimodal sequences.
+# Use with scripts/pretrain_ssl.py.
+
+method: mae
+
+# Encoder backbone: transformer | jamba | mamba.
+arch: transformer
+
+# Model — standardized compute: 128-dim, 2 layers, 4 heads (head_dim 32),
+# matching the downstream e2e backbone so SSL encoders transfer 1:1.  Bumped up
+# from 64/1 (too narrow: V-JEPA drifted, downstream sat near prevalence); VRAM is
+# BERT-bound so the larger backbone is effectively free on 48 GB RTX 6000 Ada.
+embedding_dim: 128
+heads: 4
+num_layers: 2
+dropout: 0.1
+
+# Mamba / Jamba backbone knobs (ignored by the transformer backbone).
+state_size: 16
+conv_kernel: 4
+jamba_transformer_layers: 1
+jamba_mamba_layers: 1
+
+# MAE decoder (ignored for SimMIM / I-JEPA). Discarded after pretraining, so it
+# does NOT count toward the deployed-encoder 128/2 standard — kept at 2 layers so
+# the reconstruction objective remains learnable.
+decoder_layers: 2
+decoder_heads: 2
+decoder_dim: 128
+norm_pix_loss: false
+
+# I-JEPA / V-JEPA predictor (ignored for MAE / SimMIM). Also discarded after
+# pretraining; 2 layers keeps latent prediction non-degenerate at 128-dim.
+predictor_layers: 2
+predictor_heads: 2
+predictor_dim: 128
+ema_decay: 0.996
+ema_end: 1.0
+num_target_blocks: 4
+target_block_len: 4
+
+# Masking
+mask_ratio: 0.5
+mask_strategy: block
+lab_mask_ratio: null
+text_mask_ratio: null
+
+# Training
+epochs: 50
+batch_size: 32
+lr: 0.0001
+weight_decay: 0.05
+max_grad_norm: 1.0
+scheduler: cosine
+warmup_steps: 1000
+save_every_n_epochs: 5
+
+# Task
+observation_window_hours: 24
+note_extraction: regex
+note_source: discharge
+icd_codes: false
+include_vitals: false
+tokenizer_model: null
+freeze_encoder: false
+text_finetune_mode: full
+
+# Data / compute
+num_workers: 4
+seed: 42
