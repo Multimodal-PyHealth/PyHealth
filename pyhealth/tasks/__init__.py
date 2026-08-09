@@ -46,7 +46,6 @@ from .mortality_prediction_stagenet_mimic4 import (
 )
 from .multimodal_mimic4 import (
     ClinicalNotesMIMIC4,
-    ClinicalNotesICDLabsMIMIC4,
     NotesLabsMIMIC4,
 )
 from .patient_linkage import patient_linkage_mimic3_fn
@@ -73,6 +72,7 @@ from .variant_classification import (
 from .multimodal_mimic4 import (
     ClinicalNotesMIMIC4,
     ClinicalNotesICDLabsMIMIC4,
+    LabsOnlyMIMIC4,
     ClinicalNotesICDLabsCXRMIMIC4,
 )
 from .patient_linkage_mimic3 import PatientLinkageMIMIC3Task

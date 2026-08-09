@@ -74,6 +74,8 @@ from .bmd_hs import BMDHSDataset
 from .support2 import Support2Dataset
 from .tcga_prad import TCGAPRADDataset
 from .splitter import (
+    sample_oversample,
+    sample_weighted,
     sample_balanced,
     split_by_patient,
     split_by_patient_conformal,

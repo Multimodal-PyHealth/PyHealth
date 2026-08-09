@@ -693,3 +693,121 @@ def split_by_sample_conformal(
         cal_dataset = dataset.subset(cal_index) # type: ignore
         test_dataset = dataset.subset(test_index) # type: ignore
         return train_dataset, val_dataset, cal_dataset, test_dataset
+
+
+def sample_oversample(
+    dataset: SampleDataset,
+    ratio: float = 1.0,
+    seed: Optional[int] = None,
+    label_key: str = "label",
+) -> SampleDataset:
+    """Oversample minority (positive) class by duplicating with replacement.
+
+    Keeps ALL negative samples and duplicates positives until n_pos ≈ n_neg / ratio.
+    Unlike undersampling, no negatives are discarded — full negative diversity is preserved.
+    Trade-off: frozen-encoder models may overfit on duplicate positive embeddings.
+
+    Args:
+        dataset: Dataset with ``patient_to_index`` populated.
+        ratio: Target negatives-per-positive (e.g., 1.0 → equal pos/neg; 3.0 → 3:1).
+               Values ≤0 are invalid. If the existing ratio already meets the target,
+               the dataset is returned unmodified.
+        seed: Optional RNG seed for reproducible positive sampling.
+        label_key: Key to use for accessing the label field in each sample.
+
+    Returns:
+        A new ``SampleDataset`` containing all negatives plus oversampled positives,
+        with refreshed ``patient_to_index`` and ``record_to_index`` mappings.
+    """
+    if ratio <= 0:
+        raise ValueError("ratio must be positive")
+
+    rng = np.random.default_rng(seed)
+
+    pos_indices: List[int] = []
+    neg_indices: List[int] = []
+
+    for idx in range(len(dataset)):
+        label = _label_to_int(dataset[idx][label_key])
+        if label == 1:
+            pos_indices.append(idx)
+        else:
+            neg_indices.append(idx)
+
+    if not pos_indices or not neg_indices:
+        return dataset
+
+    target_pos = max(len(pos_indices), int(round(len(neg_indices) / ratio)))
+    if target_pos <= len(pos_indices):
+        return dataset
+
+    extra_needed = target_pos - len(pos_indices)
+    extra_pos = list(rng.choice(pos_indices, size=extra_needed, replace=True))
+
+    keep_indices = pos_indices + extra_pos + neg_indices
+
+    oversampled = dataset.subset(keep_indices)  # type: ignore
+
+    oversampled.patient_to_index = {}
+    oversampled.record_to_index = {}
+    for i in range(len(oversampled)):
+        sample = oversampled[i]
+        pid = sample.get("patient_id")
+        rid = sample.get("record_id", sample.get("visit_id"))
+        if pid is not None:
+            oversampled.patient_to_index.setdefault(pid, []).append(i)
+        if rid is not None:
+            oversampled.record_to_index.setdefault(rid, []).append(i)
+
+    return oversampled
+
+
+def sample_weighted(
+    dataset: SampleDataset,
+    seed: Optional[int] = None,
+    label_key: str = "label",
+) -> SampleDataset:
+    """Create one fixed, approximately class-balanced bootstrap sample.
+
+    Draws ``len(dataset)`` indices with replacement using class-proportional
+    probabilities (p[i] = 1/class_count[label[i]], normalised). The resampled
+    dataset has the same length as the original, but roughly
+    balanced class frequencies. The sampled multiset is fixed; use
+    ``get_weighted_dataloader`` for a fresh sampler draw each epoch.
+
+    Args:
+        dataset: Dataset whose samples have a binary label field.
+        seed: Optional RNG seed for reproducibility.
+        label_key: Key to use for accessing the label field in each sample.
+
+    Returns:
+        A new ``SampleDataset`` containing the resampled indices (with
+        refreshed ``patient_to_index`` and ``record_to_index``).
+    """
+    rng = np.random.default_rng(seed)
+
+    labels = np.array([_label_to_int(dataset[i][label_key]) for i in range(len(dataset))])
+    if set(np.unique(labels).tolist()) != {0, 1}:
+        raise ValueError(
+            "sample_weighted: dataset has a missing class — cannot compute weights"
+        )
+    class_counts = np.bincount(labels, minlength=2)
+    class_weights = 1.0 / class_counts.astype(float)
+    sample_probs = class_weights[labels]
+    sample_probs /= sample_probs.sum()
+
+    chosen = list(rng.choice(len(dataset), size=len(dataset), replace=True, p=sample_probs))
+    resampled = dataset.subset(chosen)  # type: ignore
+
+    resampled.patient_to_index = {}
+    resampled.record_to_index = {}
+    for i in range(len(resampled)):
+        sample = resampled[i]
+        pid = sample.get("patient_id")
+        rid = sample.get("record_id", sample.get("visit_id"))
+        if pid is not None:
+            resampled.patient_to_index.setdefault(pid, []).append(i)
+        if rid is not None:
+            resampled.record_to_index.setdefault(rid, []).append(i)
+
+    return resampled
