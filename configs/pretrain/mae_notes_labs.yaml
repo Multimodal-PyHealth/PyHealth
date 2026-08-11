@@ -1,0 +1,8 @@
+_inherit: base.yaml
+
+method: mae
+task: notes_labs
+mask_ratio: 0.5
+lab_mask_ratio: 0.5
+text_mask_ratio: 0.25
+output_dir: ./output/pretrain/mae_notes_labs

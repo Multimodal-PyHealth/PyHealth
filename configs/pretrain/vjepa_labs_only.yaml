@@ -1,0 +1,9 @@
+_inherit: base.yaml
+
+method: vjepa
+task: labs_only
+num_target_blocks: 4
+target_block_scales: [2, 4, 8]
+require_multimodal_blocks: false
+normalize_targets: true
+output_dir: ./output/pretrain/vjepa_labs_only

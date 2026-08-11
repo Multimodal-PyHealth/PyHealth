@@ -1,0 +1,7 @@
+_inherit: base.yaml
+
+method: mae
+task: labs_only
+mask_ratio: 0.5
+lab_mask_ratio: 0.5
+output_dir: ./output/pretrain/mae_labs_only

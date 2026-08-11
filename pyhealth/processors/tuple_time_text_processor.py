@@ -22,7 +22,7 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
         self, 
         type_tag: str = "note",
         tokenizer_model: Optional[str] = None,
-        max_length: int = 128,
+        max_length: int = 512,
         padding: bool = True,
         truncation: bool = True,
     ):
@@ -123,7 +123,7 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
             # Tokenize the list of texts
             encoded = self.tokenizer(
                 texts,
-                padding="max_length" if self.padding else False,
+                padding="longest" if self.padding else False if self.padding else False,
                 truncation=self.truncation,
                 max_length=self.max_length,
                 return_tensors="pt"
