@@ -5,7 +5,7 @@ tables:
     patient_id: "subject_id"
     timestamp:
       - "studydate"
-      - "studytime"
+      - "studytime_normalized"
     timestamp_format: "%Y%m%d%H%M%S"
     attributes:
       - "image_path"

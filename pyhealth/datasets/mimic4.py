@@ -191,6 +191,15 @@ class MIMIC4CXRDataset(BaseDataset):
         log_memory_usage(f"After initializing {dataset_name}")
 
     def prepare_metadata(self, root: str) -> None:
+        prepared_path = os.path.join(root, "mimic-cxr-2.0.0-metadata-pyhealth.csv")
+        # The prepared file holds absolute JPEG paths. To rewrite its 100+ MB
+        # CSV for every CXR experiment is needless shared-filesystem IO, and it
+        # races a concurrent reader, so reuse the file when it is present. An
+        # installation with raw metadata only still uses the builder below.
+        if os.path.exists(prepared_path):
+            header = pd.read_csv(prepared_path, nrows=1)
+            if "image_path" in header.columns:
+                return
         metadata = pd.read_csv(
             os.path.join(root, "mimic-cxr-2.0.0-metadata.csv.gz"), dtype=str
         )
@@ -217,9 +226,7 @@ class MIMIC4CXRDataset(BaseDataset):
 
         metadata["image_path"] = metadata.apply(process_image_path, axis=1)
 
-        metadata.to_csv(
-            os.path.join(root, "mimic-cxr-2.0.0-metadata-pyhealth.csv"), index=False
-        )
+        metadata.to_csv(prepared_path, index=False)
         return
 
 

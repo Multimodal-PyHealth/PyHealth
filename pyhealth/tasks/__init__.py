@@ -74,5 +74,6 @@ from .multimodal_mimic4 import (
     ClinicalNotesMIMIC4,
     ClinicalNotesICDLabsMIMIC4,
     ClinicalNotesICDLabsCXRMIMIC4,
+    CXRMultimodalMIMIC4,
 )
 from .patient_linkage_mimic3 import PatientLinkageMIMIC3Task

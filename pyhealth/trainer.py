@@ -61,6 +61,30 @@ def get_metrics_fn(mode: str) -> Callable:
         raise ValueError(f"Mode {mode} is not supported")
 
 
+def is_text_pathway_param(name: str, text_fields, frozen_text_fields=()) -> bool:
+    """Whether a parameter belongs to the text pathway, for discriminative LR.
+
+    ``encoder_lr`` exists to give a PRETRAINED encoder a gentler learning rate
+    than the randomly initialised layers around it, so a projection normally
+    keeps the base rate.
+
+    The exception is a frozen encoder. Then every ``encoders.*`` parameter has
+    ``requires_grad=False``, the group is empty, and ``encoder_lr`` controls
+    nothing, while the only trainable text parameters, ``projections.*``, keep
+    the base rate. For those fields the projection IS the text pathway, so it
+    joins the group.
+    """
+    frozen = set(frozen_text_fields or ())
+    return any(
+        name.startswith(f"embedding_model.encoders.{field}.")
+        or (
+            field in frozen
+            and name.startswith(f"embedding_model.projections.{field}.")
+        )
+        for field in text_fields
+    )
+
+
 class Trainer:
     """Trainer for PyTorch models.
 
@@ -140,6 +164,7 @@ class Trainer:
         accumulation_steps: int = 1,
         use_amp: bool = False,
         amp_dtype: str = "bf16",
+        encoder_lr: Optional[float] = None,
     ):
         """Trains the model.
 
@@ -196,16 +221,49 @@ class Trainer:
         # set optimizer
         param = list(self.model.named_parameters())
         no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
+        def _decayed(n):
+            return not any(nd in n for nd in no_decay)
+
         optimizer_grouped_parameters = [
             {
-                "params": [p for n, p in param if not any(nd in n for nd in no_decay)],
+                "params": [p for n, p in param if _decayed(n)],
                 "weight_decay": weight_decay,
             },
             {
-                "params": [p for n, p in param if any(nd in n for nd in no_decay)],
+                "params": [p for n, p in param if not _decayed(n)],
                 "weight_decay": 0.0,
             },
         ]
+        if encoder_lr is not None:
+            # A pretrained text encoder needs a gentler rate than the randomly
+            # initialised layers around it. Everything else keeps the base rate
+            # from optimizer_params.
+            embedding_model = getattr(self.model, "embedding_model", None)
+            modality_types = getattr(embedding_model, "modality_types", {})
+            text_fields = {
+                field
+                for field, modality in modality_types.items()
+                if getattr(modality, "value", modality) == "text"
+            }
+            if not text_fields:
+                raise ValueError(
+                    "encoder_lr was set, but the model has no text encoder"
+                )
+            frozen_text_fields = getattr(embedding_model, "_frozen_text_fields", set())
+
+            def _is_encoder(n):
+                return is_text_pathway_param(n, text_fields, frozen_text_fields)
+
+            optimizer_grouped_parameters = [
+                {"params": [p for n, p in param if _is_encoder(n) and _decayed(n)],
+                 "weight_decay": weight_decay, "lr": encoder_lr},
+                {"params": [p for n, p in param if _is_encoder(n) and not _decayed(n)],
+                 "weight_decay": 0.0, "lr": encoder_lr},
+                {"params": [p for n, p in param if not _is_encoder(n) and _decayed(n)],
+                 "weight_decay": weight_decay},
+                {"params": [p for n, p in param if not _is_encoder(n) and not _decayed(n)],
+                 "weight_decay": 0.0},
+            ]
         optimizer = optimizer_class(optimizer_grouped_parameters, **optimizer_params)
 
         # initialize
@@ -300,10 +358,18 @@ class Trainer:
             if self.exp_path is not None:
                 self.save_ckpt(os.path.join(self.exp_path, "last.ckpt"))
 
+            # An epoch mean cannot show the difference between a run that
+            # starts badly and a run that becomes worse inside the epoch.
+            # Record the trajectory so a divergence is visible without a rerun.
+            _head = training_loss[: min(100, len(training_loss))]
+            _tail = training_loss[-min(100, len(training_loss)):]
             epoch_record: Dict = {
                 "epoch": epoch,
                 "global_step": global_step,
                 "train_loss": sum(training_loss) / len(training_loss),
+                "train_loss_first_step": round(training_loss[0], 6),
+                "train_loss_first100": round(sum(_head) / len(_head), 6),
+                "train_loss_last100": round(sum(_tail) / len(_tail), 6),
                 "epoch_time_s": round(epoch_time, 3),
                 **{f"train_{k}": v for k, v in vram.items()},
             }

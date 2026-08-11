@@ -1447,3 +1447,200 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
             record["icd_codes"] = (all_icd_times, all_icd_codes)
 
         return [record]
+
+
+class CXRMultimodalMIMIC4(BaseMultimodalMIMIC4Task):
+    """Admission-level MIMIC-IV mortality task with timestamped MIMIC-CXR.
+
+    MIMIC-CXR has no ``hadm_id``.  This task therefore links an image event to
+    an admission only when the *same subject's* ``StudyDate + StudyTime`` falls
+    inside that admission's observation interval.  This is intentionally done
+    in the task (instead of a loose subject-level merge) so studies acquired
+    after prediction time cannot enter the sample.
+
+    MIMIC-CXR and MIMIC-IV timestamps are both de-identified with the same
+    patient-specific date shift.  Consequently, ``metadata.timestamp -
+    admission.timestamp`` is a valid hours-from-admission time just like the
+    lab offsets used by :meth:`_collect_labs`.
+
+    The default is PA/AP frontal images only.  Frontal views are the standard
+    clinical CXR representation and exclude lateral/oblique acquisitions whose
+    geometry makes a single lightweight patch encoder substantially less
+    comparable.  Set ``frontal_only=False`` to retain every view.
+
+    One sample is emitted per admission with at least one eligible CXR.  This
+    preserves the actual CXR-to-admission linkage rather than injecting an
+    invalid blank image placeholder for unlinked admissions.  Patient-level
+    splitting remains required downstream to avoid patient overlap.
+
+    Args:
+        window_hours: Observation window from admission. Defaults to 24 h.
+        include_labs: Include the existing timestamped 10-dimensional lab
+            vectors in the same admission window.
+        include_notes: Include existing admission-context notes in the same
+            window. Requires the corresponding MIMIC-IV note table.
+        frontal_only: Keep PA/AP images only. Defaults to ``True``.
+        image_size: Square loader resize. Defaults to 224.
+        max_images: Cap images per admission after chronological sorting. The
+            most recent images are retained, matching ``TimeImageProcessor``.
+        note_source: ``"discharge"`` or ``"radiology"`` when notes are used.
+    """
+
+    task_name: str = "CXRMultimodalMIMIC4"
+    output_schema: Dict[str, str] = {"mortality": "binary"}
+
+    _CXR_SCHEMA: ClassVar[Dict[str, Union[str, Tuple[str, Dict]]]] = {
+        # MIMIC-CXR JPEGs are grayscale.  Decoding to one channel avoids a
+        # gratuitous 3x input expansion while VisionEmbeddingModel/PatchEmbedding
+        # automatically receives the processor's inferred channel count.
+        "cxr": ("time_image", {"image_size": 224, "mode": "L", "max_images": 4}),
+    }
+    _NOTES_SCHEMA: ClassVar[Tuple[str, Dict]] = (
+        "tuple_time_text",
+        {
+            "tokenizer_model": "emilyalsentzer/Bio_ClinicalBERT",
+            "max_length": 512,
+            "type_tag": "note",
+        },
+    )
+
+    def __init__(
+        self,
+        window_hours: Optional[float] = 24,
+        include_labs: bool = False,
+        include_notes: bool = False,
+        frontal_only: bool = True,
+        image_size: int = 224,
+        max_images: Optional[int] = 4,
+        note_source: str = "discharge",
+    ) -> None:
+        if window_hours is not None and window_hours < 0:
+            raise ValueError("window_hours must be non-negative or None.")
+        if image_size <= 0:
+            raise ValueError("image_size must be positive.")
+        if max_images is not None and max_images <= 0:
+            raise ValueError("max_images must be positive or None.")
+        if note_source not in {"discharge", "radiology"}:
+            raise ValueError(f"Unsupported note_source: {note_source!r}")
+
+        super().__init__(window_hours=window_hours)
+        # Included in the task cache UUID; increment on emitted-record changes.
+        self.cxr_pipeline_cache_version = 1
+        self.include_labs = include_labs
+        self.include_notes = include_notes
+        self.frontal_only = frontal_only
+        self.image_size = image_size
+        self.max_images = max_images
+        self.note_source = note_source
+
+        schema = dict(self._CXR_SCHEMA)
+        schema["cxr"] = (
+            "time_image",
+            {"image_size": image_size, "mode": "L", "max_images": max_images},
+        )
+        if include_labs:
+            schema["labs"] = ("stagenet_tensor", {})
+            schema["labs_mask"] = ("stagenet_tensor", {})
+        if include_notes:
+            schema["admission_note_times"] = self._NOTES_SCHEMA
+        self.input_schema = schema
+
+        suffix = ["frontal" if frontal_only else "allviews"]
+        if include_labs:
+            suffix.append("labs")
+        if include_notes:
+            suffix.append(f"notes_{note_source}")
+        self.task_name = "CXRMultimodalMIMIC4_" + "_".join(suffix)
+
+    def _cxr_window_end(self, admission_time: datetime, admission: Any) -> datetime:
+        """Return this admission's leakage-safe CXR/lab/note cutoff."""
+        dischtime = self._parse_datetime(getattr(admission, "dischtime", None))
+        if dischtime is None or dischtime < admission_time:
+            dischtime = admission_time
+        if self.window_hours is None:
+            return dischtime
+        return min(dischtime, admission_time + timedelta(hours=self.window_hours))
+
+    def _collect_admission_cxr(
+        self,
+        patient: Any,
+        admission_time: datetime,
+        end_time: datetime,
+    ) -> Tuple[List[str], List[float]]:
+        """Collect valid CXR paths and real hours-from-admission timestamps."""
+        events = patient.get_events(
+            event_type="metadata", start=admission_time, end=end_time
+        )
+        paths: List[str] = []
+        times: List[float] = []
+        seen_dicom: set[str] = set()
+        for event in events:
+            try:
+                view = str(getattr(event, "viewposition", "")).upper().strip()
+                if self.frontal_only and view not in {"PA", "AP"}:
+                    continue
+                path = str(event.image_path)
+                dicom_id = str(getattr(event, "dicom_id", path))
+                if not path or dicom_id in seen_dicom:
+                    continue
+                seen_dicom.add(dicom_id)
+                paths.append(path)
+                times.append(
+                    self._to_hours((event.timestamp - admission_time).total_seconds())
+                )
+            except AttributeError:
+                # A malformed metadata record cannot become an image event.
+                continue
+        return paths, times
+
+    def __call__(self, patient: Any) -> List[Dict[str, Any]]:
+        if not patient.get_events(event_type="patients"):
+            return []
+        records: List[Dict[str, Any]] = []
+        for admission in patient.get_events(event_type="admissions"):
+            admission_time = admission.timestamp
+            # Discharge-note retrieval spans the admission (the section
+            # extraction is the temporal control), so this loop needs dischtime.
+            admission_dischtime = (
+                self._parse_datetime(getattr(admission, "dischtime", None))
+                or admission_time
+            )
+            end_time = self._cxr_window_end(admission_time, admission)
+            cxr_paths, cxr_times = self._collect_admission_cxr(
+                patient, admission_time, end_time
+            )
+            # Do not fabricate an image sentinel: an unreadable blank path would
+            # fail the image processor and, more importantly, hide cohort shift.
+            if not cxr_paths:
+                continue
+
+            record: Dict[str, Any] = {
+                "patient_id": patient.patient_id,
+                "hadm_id": str(getattr(admission, "hadm_id", "")),
+                "cxr": (cxr_paths, cxr_times),
+                "mortality": int(getattr(admission, "hospital_expire_flag", 0) in (1, "1")),
+                "window_start": admission_time,
+                "window_end": end_time,
+            }
+            if self.include_labs:
+                lab_times, lab_values, lab_masks = self._collect_labs(
+                    patient=patient, admission_time=admission_time, end_time=end_time
+                )
+                record["labs"] = (lab_times, lab_values)
+                record["labs_mask"] = (lab_times, lab_masks)
+            if self.include_notes:
+                # Use the admission-context section extraction that main
+                # already has. A discharge summary is written with knowledge of
+                # the outcome, so only the admission-context sections enter a
+                # sample.
+                texts, note_times = self._collect_notes(
+                    patient,
+                    self.note_source,
+                    getattr(admission, "hadm_id", None),
+                    admission_time,
+                    end_time=end_time,
+                    section_headers=self.DISCHARGE_CLINICAL_HEADERS,
+                )
+                record["admission_note_times"] = (texts, note_times)
+            records.append(record)
+        return records
