@@ -655,8 +655,12 @@ def run(args: argparse.Namespace) -> Path:
             RuntimeWarning, stacklevel=2,
         )
 
-    # Experiment name encodes model + seed for easy log separation
-    exp_name = f"{args.model}_seed{args.seed}"
+    # The task MUST be in the name. Without it, two arms of the same comparison
+    # at the same seed, for example --task labs_only and --task notes_labs,
+    # resolve to one directory and the second run overwrites the first run's
+    # metrics_history.json, run_config.json and predictions CSV. The loss is
+    # silent: the surviving directory looks like a complete run.
+    exp_name = f"{args.task}_{args.model}_seed{args.seed}"
     output_dir = Path(args.output_dir)
 
     trainer = Trainer(
