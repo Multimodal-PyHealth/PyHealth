@@ -626,7 +626,10 @@ def run(args: argparse.Namespace) -> Path:
     print(f"[pos_weight] Using pos_weight={pw_value:.2f} for binary BCE loss.")
     model._pos_weight = torch.tensor([pw_value], dtype=torch.float32)
 
-    loader_kwargs = {
+    # DataLoader worker options arrive with the performance PR. Pass only what
+    # this checkout's get_dataloader accepts, and stop if the caller asked for
+    # one it cannot honour, so a requested option is never silently ignored.
+    _wanted_loader = {
         "num_workers": args.loader_num_workers,
         "pin_memory": args.pin_memory,
         "persistent_workers": (
@@ -635,6 +638,27 @@ def run(args: argparse.Namespace) -> Path:
         "prefetch_factor": (
             args.prefetch_factor if args.loader_num_workers > 0 else None
         ),
+    }
+    _loader_accepts = set(inspect.signature(get_dataloader).parameters)
+    _loader_defaults = {
+        "num_workers": 0,
+        "pin_memory": False,
+        "persistent_workers": False,
+        "prefetch_factor": None,
+    }
+    _unsupported_loader = [
+        name
+        for name, value in _wanted_loader.items()
+        if name not in _loader_accepts and value != _loader_defaults[name]
+    ]
+    if _unsupported_loader:
+        raise SystemExit(
+            f"get_dataloader in this checkout does not accept "
+            f"{', '.join(sorted(_unsupported_loader))}. Drop the flag, or use a "
+            f"checkout that includes the DataLoader worker options."
+        )
+    loader_kwargs = {
+        k: v for k, v in _wanted_loader.items() if k in _loader_accepts
     }
     train_loader = get_dataloader(
         train_ds,
