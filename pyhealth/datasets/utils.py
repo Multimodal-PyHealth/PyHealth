@@ -8,6 +8,8 @@ import torch
 import litdata
 from dateutil.parser import parse as dateutil_parse
 from torch.nn.utils.rnn import pad_sequence
+
+from pyhealth.datasets.collate import _pad_stack
 from torch.utils.data import DataLoader
 
 from pyhealth import BASE_CACHE_PATH
@@ -301,13 +303,12 @@ def collate_fn_dict_with_padding(batch: List[dict]) -> dict:
                         # no mask reads padding as data.
                         if event_lengths is None:
                             event_lengths = [v.shape[0] for v in tensor_vals]
-                        collated_elems.append(
-                            pad_sequence(
-                                tensor_vals,
-                                batch_first=True,
-                                padding_value=0,
-                            )
-                        )
+                        # pad_sequence only pads dim 0 and needs every
+                        # trailing dim to match. Tokenised notes are
+                        # (n_notes, seq_len) and, once the text processor pads
+                        # to the longest note in a sample rather than to a
+                        # fixed max_length, BOTH dims vary across samples.
+                        collated_elems.append(_pad_stack(tensor_vals))
                 else:
                     collated_elems.append(list(elem_vals))
 
