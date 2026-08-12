@@ -110,6 +110,12 @@ class RNNLayer(nn.Module):
             )
         else:
             lengths = torch.sum(mask.int(), dim=-1).cpu()
+            # pack_padded_sequence rejects a zero length. Before batch padding
+            # was masked, every mask was all ones and this was unreachable; a
+            # correct mask makes a sample with no valid event reachable, so
+            # clamp to 1. The first step is then read and the caller sees a
+            # finite value instead of a crash.
+            lengths = torch.clamp(lengths, min=1)
         # Ensure tensor is contiguous for cuDNN compatibility
         x = x.contiguous()
         x = rnn_utils.pack_padded_sequence(

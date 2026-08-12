@@ -556,7 +556,13 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         for field_name, feat_dict in inputs.items():
             value = feat_dict["value"]  # (B, N_i, ...) or (B, S, F)
             time = feat_dict["time"]  # (B, N_i)
-            mask = feat_dict.get("mask")
+            # "Is this slot a real event, or batch padding?" The collator
+            # creates the padding, so only the collator knows. This is NOT the
+            # same as a field's own ``{field}_mask``, which answers "was this
+            # value observed" and is consumed by the standardiser below.
+            mask = feat_dict.get("pad_mask")
+            if mask is None:
+                mask = feat_dict.get("mask")
 
             if time is None:
                 # Fallback: treat every event as occurring at t=0
@@ -643,18 +649,25 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
                     else None
                 )
                 if standardizer is not None:
-                    if mask is None:
+                    # Observation flags live in the sibling ``{field}_mask``
+                    # FIELD, not in this field's dict. Reading the padding mask
+                    # here would tell the standardiser that every real event
+                    # was measured, which is exactly the distinction the
+                    # standardiser exists to preserve.
+                    sibling = inputs.get(f"{field_name}_mask")
+                    obs = sibling["value"] if isinstance(sibling, dict) else None
+                    if obs is None:
                         raise ValueError(
                             f"The standardiser for {field_name!r} needs a paired "
-                            f"{field_name}_mask field."
+                            f"{field_name}_mask field in the batch."
                         )
-                    # The standardiser needs one flag for each feature. An
-                    # event-level mask (B, T) applies to every feature of that
-                    # event, so expand it.
-                    obs = mask
-                    if obs.dim() == value.dim() - 1:
-                        obs = obs.unsqueeze(-1).expand_as(value)
-                    value = standardizer(value, obs)
+                    if obs.shape != value.shape:
+                        raise ValueError(
+                            f"{field_name}_mask has shape {tuple(obs.shape)}, "
+                            f"which does not match {field_name} "
+                            f"{tuple(value.shape)}."
+                        )
+                    value = standardizer(value, obs.bool())
                 emb = encoder(value)  # (B, T, E')
 
             # ── Build event-level validity mask ───────────────────────────
@@ -685,7 +698,19 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         cat_types = torch.cat(all_types, dim=1)  # (B, S_total)
 
         # ── Sort by time ──────────────────────────────────────────────────
-        sort_idx = cat_time.argsort(dim=1)
+        # Padding carries time 0.0, so a plain ascending sort places it BEFORE
+        # every real event. Three consumers then read it: RNNLayer packs the
+        # first ``mask.sum()`` steps, ``get_last_visit`` indexes
+        # ``mask.sum() - 1``, and TransformerLayer takes position 0 as its CLS
+        # vector. Push invalid slots past every real one to keep the sequence
+        # left-aligned, which is what all three assume.
+        #
+        # Stable, because the key is heavily tied: all padding shares time 0.0
+        # and events from one admission share offsets. An unstable sort makes
+        # event order differ between torch builds and between CPU and CUDA,
+        # silently changing RNN and Mamba outputs.
+        sort_key = cat_time.masked_fill(~cat_mask.bool(), float("inf"))
+        sort_idx = sort_key.argsort(dim=1, stable=True)
         cat_emb = cat_emb.gather(1, sort_idx.unsqueeze(-1).expand_as(cat_emb))
         cat_time = cat_time.gather(1, sort_idx)
         cat_mask = cat_mask.gather(1, sort_idx)
@@ -703,7 +728,10 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
             # together 13. F.layer_norm without weight or bias adds NO
             # parameters, so an existing checkpoint still loads.
             cat_emb = F.layer_norm(cat_emb, (cat_emb.shape[-1],))
-        final = cat_emb + time_emb + type_emb  # (B, S_total, E')
+        final = cat_emb + time_emb + type_emb
+        # Zero the padded slots so a consumer that ignores the mask, such as a
+        # mean pool, still cannot pick them up.
+        final = final * cat_mask.unsqueeze(-1).to(final.dtype)  # (B, S_total, E')
 
         return {
             "sequence": final,  # (B, S_total, E')
