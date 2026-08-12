@@ -50,6 +50,7 @@ Example
 from __future__ import annotations
 
 import argparse
+import inspect
 import csv
 import warnings
 from pathlib import Path
@@ -149,7 +150,11 @@ def _build_task(args: argparse.Namespace):
     if args.task == "clinical_notes_icd_labs":
         return ClinicalNotesICDLabsMIMIC4(window_hours=args.observation_window_hours)
     if args.task in ("notes_labs", "notes_only"):
-        task_kwargs = dict(
+        # Pass only what this checkout's task class accepts. A flag the class
+        # cannot honour must stop the run, not be dropped: a silently ignored
+        # --discharge-note-policy would record one protocol in run_config.json
+        # and execute another.
+        wanted = dict(
             window_hours=args.observation_window_hours,
             include_icd=args.icd_codes,
             include_vitals=args.include_vitals,
@@ -158,12 +163,37 @@ def _build_task(args: argparse.Namespace):
             note_source=getattr(args, "note_source", "discharge"),
             discharge_note_policy=getattr(
                 args, "discharge_note_policy", "extraction"),
+            text_normalize=getattr(args, "text_normalize", "none"),
         )
-        # Only pass text_normalize when actually requested, so this script still
-        # runs against a checkout whose task class predates the parameter.
-        _tn = getattr(args, "text_normalize", "none")
-        if _tn and _tn != "none":
-            task_kwargs["text_normalize"] = _tn
+        accepted = set(
+            inspect.signature(NotesLabsMIMIC4.__init__).parameters
+        )
+        defaults = {
+            "include_icd": False,
+            "include_vitals": False,
+            "include_labs": True,
+            "note_extraction": "regex",
+            "note_source": "discharge",
+            "discharge_note_policy": "extraction",
+            "text_normalize": "none",
+        }
+        unsupported = [
+            name
+            for name, value in wanted.items()
+            if name not in accepted and value != defaults.get(name)
+        ]
+        if unsupported:
+            raise SystemExit(
+                f"NotesLabsMIMIC4 in this checkout does not accept "
+                f"{', '.join(sorted(unsupported))}. Either drop the flag or use "
+                f"a checkout whose task class supports it."
+            )
+        task_kwargs = {k: v for k, v in wanted.items() if k in accepted}
+        if args.task == "notes_only" and "include_labs" not in accepted:
+            raise SystemExit(
+                "--task notes_only needs a NotesLabsMIMIC4 that accepts "
+                "include_labs; this checkout always emits labs."
+            )
         task = NotesLabsMIMIC4(**task_kwargs)
         if args.tokenizer_model:
             schema_key = "admission_note_times"
