@@ -556,13 +556,15 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         for field_name, feat_dict in inputs.items():
             value = feat_dict["value"]  # (B, N_i, ...) or (B, S, F)
             time = feat_dict["time"]  # (B, N_i)
-            # "Is this slot a real event, or batch padding?" The collator
-            # creates the padding, so only the collator knows. This is NOT the
-            # same as a field's own ``{field}_mask``, which answers "was this
-            # value observed" and is consumed by the standardiser below.
-            mask = feat_dict.get("pad_mask")
-            if mask is None:
-                mask = feat_dict.get("mask")
+            # Three different masks meet here and must not be conflated.
+            #   mask      token level, from the processor schema; this is the
+            #             attention mask a text encoder needs.
+            #   pad_mask  event level, from the collator; which slots are real
+            #             events rather than batch padding.
+            #   {field}_mask  a separate FIELD meaning "was this value
+            #             observed", consumed by the standardiser below.
+            mask = feat_dict.get("mask")
+            pad_mask = feat_dict.get("pad_mask")
 
             if time is None:
                 # Fallback: treat every event as occurring at t=0
@@ -671,7 +673,19 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
                 emb = encoder(value)  # (B, T, E')
 
             # ── Build event-level validity mask ───────────────────────────
-            if mask is None:
+            if pad_mask is not None:
+                # The collator is authoritative about batch padding.
+                event_mask = pad_mask.to(emb.device).float()
+                if event_mask.shape[1] != emb.shape[1]:
+                    # A nested CODE field was flattened to (B, S*C); repeat the
+                    # event flags along the same axis.
+                    repeat = emb.shape[1] // event_mask.shape[1]
+                    event_mask = (
+                        event_mask.unsqueeze(-1)
+                        .expand(-1, -1, repeat)
+                        .reshape(emb.shape[0], -1)
+                    )
+            elif mask is None:
                 event_mask = torch.ones(emb.shape[:2], device=emb.device)
             else:
                 if mask.dim() > time.dim():
