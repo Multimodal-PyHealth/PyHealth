@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 import hashlib
-from itertools import chain
 import json
 from typing import Any, Optional
 
@@ -19,20 +18,31 @@ from torch import nn
 
 
 def _provenance_indices(dataset: Any) -> Optional[list[int]]:
-    """Return every sample index of a split, or ``None`` for a plain iterable.
+    """Every sample index of this split, or ``None`` for a plain iterable.
 
     ``SampleDataset`` subclasses ``litdata.StreamingDataset``, whose ``__iter__``
     and ``__len__`` are both sharded by ``WORLD_SIZE``.  Under ``torchrun`` that
-    silently reduces a fit to 1/WORLD_SIZE of the train split -- and to the *same*
-    shard on every rank, because ``torch.distributed`` is not yet initialised when
-    the dataset is built.  Indexing is not sharded, so statistics are driven from
-    the unsharded ``patient_to_index`` map instead, exactly as ``split_by_patient``
-    does.
+    silently reduces a fit to 1/WORLD_SIZE of the train split, and to the *same*
+    shard on every rank, because ``torch.distributed`` is not yet initialised
+    when the dataset is built.  Indexing is not sharded, so the fit is driven by
+    explicit indices.
+
+    The count comes from ``region_of_interest``, which is the only unsharded
+    description of what this dataset holds.  Measured against real litdata with
+    20 samples: ``len()`` reports 5 under ``WORLD_SIZE=4`` while the region of
+    interest still sums to 20.
+
+    ``patient_to_index`` is NOT usable here.  ``SampleDataset.subset`` copies it
+    unchanged, so after ``split_by_patient`` it still holds indices into the
+    PARENT dataset while ``__getitem__`` is restricted to the subset's own
+    region.  Driving the fit from it made a real training split raise
+    ``ValueError: The provided index 237 didn't find a match within the chunk
+    intervals``.
     """
-    patients = getattr(dataset, "patient_to_index", None)
-    if not isinstance(patients, dict) or not patients:
+    roi = getattr(dataset, "region_of_interest", None)
+    if not roi:
         return None
-    return sorted(chain(*patients.values()))
+    return list(range(sum(end - start for start, end in roi)))
 
 
 def _is_shardable_dataset(obj: Any) -> bool:

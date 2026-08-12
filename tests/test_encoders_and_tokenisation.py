@@ -180,11 +180,17 @@ def test_world_size_does_not_shrink_the_fit():
     samples = _lab_samples(40)
 
     class _ShardedByWorldSize:
-        """Reproduces the litdata behaviour that caused the defect."""
+        """Reproduces the litdata contract that caused the defect.
+
+        ``__len__`` and ``__iter__`` shard by ``WORLD_SIZE``; ``region_of_interest``
+        and ``__getitem__`` do not. Verified against real litdata with 20 samples:
+        ``len()`` reports 5 under ``WORLD_SIZE=4`` while the region of interest
+        still sums to 20 and indexing still reaches 19.
+        """
 
         def __init__(self, records):
             self._records = records
-            self.patient_to_index = {f"p{i}": [i] for i in range(len(records))}
+            self.region_of_interest = [(0, len(records))]
 
         def _visible(self):
             world = int(os.environ.get("WORLD_SIZE", "1"))
@@ -414,3 +420,38 @@ def test_a_full_cache_recalculates_instead_of_growing_without_limit():
     out = _encode(host, encoder, ids, mask)
     assert encoder.rows_encoded > before, "the uncached row was not recalculated"
     assert torch.isfinite(out).all()
+
+
+def test_the_fit_works_on_a_split_and_not_only_on_the_full_dataset():
+    """``SampleDataset.subset`` copies ``patient_to_index`` unchanged, so after
+    ``split_by_patient`` it still holds indices into the PARENT dataset while
+    ``__getitem__`` is restricted to the subset's own region. Driving the fit
+    from it raised on a real training split:
+
+        ValueError: The provided index 237 didn't find a match within the
+        chunk intervals [Interval(chunk_start=0, roi_start_idx=135, ...)]
+    """
+    from pyhealth.processors.lab_standardizer import _provenance_indices
+
+    class _Split:
+        """A subset: the region of interest describes it, the parent map does not."""
+
+        def __init__(self, records, keep):
+            self._records = records[:keep]
+            self.region_of_interest = [(0, keep)]
+            # Stale parent-global indices, exactly as subset() leaves them.
+            self.patient_to_index = {f"p{i}": [i] for i in range(len(records))}
+
+        def __len__(self):
+            return len(self._records)
+
+        def __getitem__(self, index):
+            return self._records[index]
+
+    split = _Split(_lab_samples(40), keep=12)
+    indices = _provenance_indices(split)
+
+    assert indices == list(range(12)), (
+        "the fit is driven by parent indices, which the split cannot serve"
+    )
+    assert max(indices) < len(split)
