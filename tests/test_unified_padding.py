@@ -219,3 +219,74 @@ def test_a_missing_observation_field_is_reported_clearly():
 
     with pytest.raises(ValueError, match="labs_mask"):
         model({"labs": {"value": torch.ones(1, 1, 2), "time": torch.tensor([[6.0]])}})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The path production actually uses
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_the_dataloader_collate_records_padding():
+    """``get_dataloader`` uses ``collate_fn_dict_with_padding``, not
+    ``collate_temporal``. A padding fix applied only to the latter is inert in
+    production, which is exactly what a real run revealed.
+    """
+    from pyhealth.datasets.utils import PAD_MASK_SUFFIX, collate_fn_dict_with_padding
+
+    # StageNet processors emit (time, value) tuples.
+    batch = [
+        {"labs": (torch.tensor([6.0, 12.0, 24.0]), torch.ones(3, 2)), "mortality": 0},
+        {"labs": (torch.tensor([6.0]), torch.ones(1, 2)), "mortality": 1},
+    ]
+    collated = collate_fn_dict_with_padding(batch)
+
+    assert f"labs{PAD_MASK_SUFFIX}" in collated
+    assert collated[f"labs{PAD_MASK_SUFFIX}"].tolist() == [
+        [True, True, True],
+        [True, False, False],
+    ]
+
+
+def test_a_batch_of_equal_lengths_reports_no_padding():
+    from pyhealth.datasets.utils import PAD_MASK_SUFFIX, collate_fn_dict_with_padding
+
+    batch = [
+        {"labs": (torch.tensor([1.0, 2.0]), torch.ones(2, 2))},
+        {"labs": (torch.tensor([3.0, 4.0]), torch.ones(2, 2))},
+    ]
+    collated = collate_fn_dict_with_padding(batch)
+
+    # Nothing was padded, so no mask is needed and none is invented.
+    assert f"labs{PAD_MASK_SUFFIX}" not in collated
+
+
+def test_the_backbone_threads_the_pad_mask_into_the_unified_inputs():
+    """``_build_unified_inputs`` keys the field dict off ``schema()``, and no
+    processor's schema contains ``mask``. The padding validity therefore has to
+    arrive on a parallel batch key or it never reaches the model.
+    """
+    from types import SimpleNamespace
+
+    from pyhealth.datasets.utils import PAD_MASK_SUFFIX, collate_fn_dict_with_padding
+    from pyhealth.models.transformer import Transformer
+
+    batch = [
+        {"labs": (torch.tensor([6.0, 12.0, 24.0]), torch.ones(3, 2))},
+        {"labs": (torch.tensor([6.0]), torch.ones(1, 2))},
+    ]
+    collated = collate_fn_dict_with_padding(batch)
+
+    host = SimpleNamespace(
+        feature_keys=["labs"],
+        device="cpu",
+        dataset=SimpleNamespace(
+            input_processors={"labs": StageNetTensorProcessor()}
+        ),
+    )
+    inputs = Transformer._build_unified_inputs(host, collated)
+
+    assert "pad_mask" in inputs["labs"], "padding validity never reaches the model"
+    assert inputs["labs"]["pad_mask"].tolist() == [
+        [True, True, True],
+        [True, False, False],
+    ]
