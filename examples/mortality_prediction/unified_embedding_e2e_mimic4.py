@@ -288,7 +288,7 @@ def _build_model(
         processors=sample_dataset.input_processors,
         embedding_dim=args.embedding_dim,
         field_embeddings=field_embeddings,
-        text_finetune_mode=finetune_mode,
+        freeze_text_encoder=(finetune_mode == "frozen"),
         normalize_content=not getattr(args, "no_normalize_content", False),
         numeric_standardizers=numeric_standardizers,
         cache_frozen_text=not getattr(args, "no_text_cache", False),
@@ -609,7 +609,6 @@ def run(args: argparse.Namespace) -> Path:
         # misleading difference caused only by independent shuffling.
         audit_batch = next(iter(get_dataloader(
             train_ds, batch_size=args.batch_size, shuffle=False,
-            num_workers=args.loader_num_workers,
         )))
         with torch.no_grad():
             model(**audit_batch)
@@ -700,8 +699,6 @@ def run(args: argparse.Namespace) -> Path:
         enable_logging=True,
         output_path=str(output_dir),
         exp_name=exp_name,
-        use_amp=args.use_amp,
-        amp_dtype=args.amp_dtype,
     )
 
     # BottleneckTransformer is more fragile on full MIMIC-IV with no warmup.
@@ -774,6 +771,10 @@ def run(args: argparse.Namespace) -> Path:
             load_best_model_at_last=True,
             patience=args.patience,
             encoder_lr=args.encoder_lr,
+            # Mixed precision is a property of the training loop, not of the
+            # Trainer object.
+            use_amp=args.use_amp,
+            amp_dtype=args.amp_dtype,
         )
 
     y_true, y_prob, _, patient_ids = trainer.inference(
