@@ -718,7 +718,11 @@ def run(args: argparse.Namespace) -> Path:
 
     trainer = Trainer(
         model=model,
-        metrics=["pr_auc", "roc_auc", "f1", "f1_opt", "accuracy"],
+        # f1_opt is a threshold-optimised F1 that this checkout's
+        # binary_metrics_fn does not implement, and requesting it aborts
+        # validation at the end of epoch 1. Model selection uses pr_auc, which
+        # is a rank metric and needs no threshold.
+        metrics=["pr_auc", "roc_auc", "f1", "accuracy"],
         device=args.device,
         enable_logging=True,
         output_path=str(output_dir),
