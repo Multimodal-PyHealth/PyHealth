@@ -327,7 +327,13 @@ def collate_fn_dict_with_padding(batch: List[dict]) -> dict:
 
 
 def get_dataloader(
-    dataset: litdata.StreamingDataset, batch_size: int, shuffle: bool = False
+    dataset: litdata.StreamingDataset,
+    batch_size: int,
+    shuffle: bool = False,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
+    prefetch_factor: Optional[int] = None,
 ) -> DataLoader:
     """Creates a DataLoader for a given dataset.
 
@@ -335,18 +341,47 @@ def get_dataloader(
         dataset: The dataset to load data from.
         batch_size: The number of samples per batch.
         shuffle: Whether to shuffle the data at every epoch.
+        num_workers: Number of worker processes that load and collate batches.
+        pin_memory: Copy CPU tensors into page-locked memory before return.
+        persistent_workers: Keep the loader workers between epochs. This is valid
+            only when ``num_workers`` is more than 0.
+        prefetch_factor: Batches that each worker loads in advance. This is valid
+            only when ``num_workers`` is more than 0. ``None`` keeps the default
+            of PyTorch.
 
     Returns:
         A DataLoader instance for the dataset.
     """
     dataset.set_shuffle(shuffle)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        collate_fn=collate_fn_dict_with_padding,
-    )
+    if num_workers < 0:
+        raise ValueError(f"num_workers must be non-negative, got {num_workers}.")
+    if persistent_workers and num_workers == 0:
+        raise ValueError("persistent_workers requires num_workers > 0.")
+    if prefetch_factor is not None and (num_workers == 0 or prefetch_factor <= 0):
+        raise ValueError(
+            "prefetch_factor must be positive and requires num_workers > 0."
+        )
 
-    return dataloader
+    loader_kwargs = {
+        "dataset": dataset,
+        "batch_size": batch_size,
+        "collate_fn": collate_fn_dict_with_padding,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    # StreamingDataLoader coordinates shard reads across workers. With a single
+    # process it adds no advantage, so keep the plain DataLoader there.
+    loader_class = (
+        litdata.StreamingDataLoader
+        if isinstance(dataset, litdata.StreamingDataset) and num_workers > 0
+        else DataLoader
+    )
+    return loader_class(**loader_kwargs)
 
 
 def save_processors(sample_dataset, output_dir: str) -> Dict[str, str]:

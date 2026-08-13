@@ -7,6 +7,7 @@ import warnings
 from typing import Any, Dict, Optional, Tuple, Union, cast
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from pyhealth.datasets import SampleDataset
@@ -55,9 +56,12 @@ class Attention(nn.Module):
             # Use -inf so softmax produces exact zeros on padded positions,
             # avoiding a second masked_fill after softmax (saves one full
             # [B, H, S, S] boolean allocation and an extra copy).
-            pad_mask = mask == 0
-            scores = scores.masked_fill(pad_mask, -1e9)
+            # Use the dtype minimum, not -1e9. Under fp16 autocast -1e9 is
+            # outside the representable range.
+            scores = scores.masked_fill(mask == 0, torch.finfo(scores.dtype).min)
         p_attn = self.softmax(scores)
+        if mask is not None:
+            p_attn = p_attn.masked_fill(mask == 0, 0)
         if dropout is not None:
             p_attn = dropout(p_attn)
 
@@ -150,19 +154,42 @@ class MultiHeadedAttention(nn.Module):
         ]
 
         # 2) Apply attention on all the projected vectors in batch.
-        if mask is not None:
-            mask = mask.unsqueeze(1)
-        x, attn = self.attention(query, key, value, mask=mask, dropout=self.dropout)
-
-        if register_hook:
-            # Only store attn_map and hook during interpretability passes.
-            # Using .detach() gives an independent copy whose storage
-            # is NOT shared with the live graph, so the graph can be freed
-            # normally after .backward() without leaking GPU memory.
+        # The explicit path materialises several (B, H, S, S) tensors for each
+        # layer. It is necessary only for interpretability, where a caller reads
+        # the attention map and its gradient. Ordinary training uses fused SDPA.
+        if not register_hook:
+            query_mask = None
+            attn_mask = None
+            if mask is not None:
+                valid = mask.bool()
+                if mask.dim() == 2:
+                    query_mask = valid[:, None, :, None]
+                    attn_mask = valid[:, None, None, :]
+                else:
+                    query_mask = valid.any(dim=-1)[:, None, :, None]
+                    attn_mask = valid.unsqueeze(1)
+            x = F.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=attn_mask,
+                dropout_p=self.dropout.p if self.training else 0.0,
+            )
+            if query_mask is not None:
+                x = x * query_mask.to(x.dtype)
+            self.attn_map = None
+            self.attn_gradients = None
+        else:
+            if mask is not None:
+                mask = mask.unsqueeze(1)
+            x, attn = self.attention(
+                query, key, value, mask=mask, dropout=self.dropout
+            )
+            # .detach() gives an independent copy whose storage is NOT shared
+            # with the live graph, so the graph can be freed after .backward()
+            # without a memory leak.
             self.attn_map = attn.detach()
             attn.register_hook(self.save_attn_grad)
-        else:
-            self.attn_map = None
         # 3) "Concat" using a view and apply a final linear.
         x = x.transpose(1, 2).contiguous().view(batch_size, -1, self.h * self.d_k)
 
