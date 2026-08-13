@@ -468,8 +468,14 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
             if flat_mask is not None
             else torch.zeros_like(ids_cpu, dtype=torch.int8)
         )
+        # Key on the REAL tokens only. The collator pads each row to the widest
+        # note in its batch, and batch composition changes every epoch because
+        # the loader shuffles, so a key over the padded row gives the same note
+        # a different key each epoch and the cache never hits. Measured on the
+        # full-scale notes run: epoch time did not fall after epoch 1
+        # (3458s, 3936s, 4048s, 3835s) because every lookup missed.
         keys = [
-            hash((tuple(i.tolist()), tuple(m.tolist())))
+            hash(tuple(i[m.bool()].tolist())) if m.any() else hash(tuple(i.tolist()))
             for i, m in zip(ids_cpu, mask_cpu)
         ]
 

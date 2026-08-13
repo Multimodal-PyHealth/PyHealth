@@ -455,3 +455,34 @@ def test_the_fit_works_on_a_split_and_not_only_on_the_full_dataset():
         "the fit is driven by parent indices, which the split cannot serve"
     )
     assert max(indices) < len(split)
+
+
+def test_the_frozen_text_cache_key_ignores_batch_padding():
+    """The collator pads each row to the widest note in its batch, and batch
+    composition changes every epoch because the loader shuffles. A key over the
+    padded row therefore gives one note a different key each epoch and the cache
+    never hits. Measured on the full-scale notes run, epoch time did not fall
+    after epoch 1: 3458s, 3936s, 4048s, 3835s.
+    """
+    from pyhealth.models.embedding.unified import UnifiedMultimodalEmbeddingModel
+
+    host = _cache_host(frozen=True)
+    encoder = _CountingEncoder()
+
+    # The same note, padded to 5 in one batch and to 3 in another.
+    wide_ids = torch.tensor([[5, 6, 7, 0, 0]])
+    wide_mask = torch.tensor([[1, 1, 1, 0, 0]])
+    narrow_ids = torch.tensor([[5, 6, 7]])
+    narrow_mask = torch.tensor([[1, 1, 1]])
+
+    UnifiedMultimodalEmbeddingModel._encode_text_cls(
+        host, "notes", encoder, wide_ids, wide_mask
+    )
+    after_first = encoder.rows_encoded
+    UnifiedMultimodalEmbeddingModel._encode_text_cls(
+        host, "notes", encoder, narrow_ids, narrow_mask
+    )
+
+    assert encoder.rows_encoded == after_first, (
+        "the same note re-encoded because the key included batch padding"
+    )
