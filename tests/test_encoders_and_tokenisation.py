@@ -173,7 +173,7 @@ def test_world_size_does_not_shrink_the_fit():
     ``torch.distributed`` is not initialised when the dataset is built, so every
     rank reported ``global_rank=0`` and fitted the same first 1/N.
 
-    The fit now reads ``patient_to_index``, which ``WORLD_SIZE`` does not divide.
+    The fit now reads ``region_of_interest``, which ``WORLD_SIZE`` does not divide.
     """
     from pyhealth.processors import fit_lab_standardizer
 

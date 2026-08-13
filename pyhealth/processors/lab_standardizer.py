@@ -131,8 +131,8 @@ class LabStandardizer(nn.Module):
                 "Refusing to fit lab standardisation by iterating a "
                 f"{type(samples).__name__}: its __iter__ is sharded by WORLD_SIZE, "
                 "so under torchrun this would silently fit on a fraction of the "
-                "training split. The dataset exposes no patient_to_index "
-                "provenance to drive an unsharded fit."
+                "training split. The dataset exposes no region_of_interest "
+                "to drive an unsharded fit."
             )
         stream = samples if indices is None else (samples[index] for index in indices)
         consumed = 0
@@ -270,13 +270,13 @@ def lab_standardizer_fit_scope(dataset: Any, *, value_field: str = "labs") -> st
     refused by the experiment scripts rather than being treated as safe by
     default.
     """
-    patients = getattr(dataset, "patient_to_index", None)
-    records = getattr(dataset, "record_to_index", None)
+    patients = getattr(dataset, "patient_to_index", None) or {}
+    records = getattr(dataset, "record_to_index", None) or {}
     indices = _provenance_indices(dataset)
     if indices is None:
         raise ValueError(
             "Cannot bind lab standardisation to a train split: dataset has no "
-            "patient_to_index provenance."
+            "region_of_interest to drive an unsharded fit."
         )
     payload = {
         "value_field": value_field,
@@ -284,6 +284,6 @@ def lab_standardizer_fit_scope(dataset: Any, *, value_field: str = "labs") -> st
         # digest taken under torchrun could never match the single-process one.
         "n_samples": len(indices),
         "patients": sorted(str(patient_id) for patient_id in patients),
-        "records": sorted(str(record_id) for record_id in (records or {})),
+        "records": sorted(str(record_id) for record_id in records),
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
