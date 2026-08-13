@@ -235,7 +235,7 @@ class MIMIC4CXRSunlabDataset(BaseDataset):
     Sunlab variant of the MIMIC-CXR Chest X-ray dataset.
 
     This variant uses the existing metadata CSV and derives flattened image
-    paths at ``images/{dicom_id}.jpg``.
+    paths at ``{images|resized_images}/{dicom_id}.jpg``.
     """
 
     def __init__(

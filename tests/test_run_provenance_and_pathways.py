@@ -213,3 +213,46 @@ def test_an_image_uses_the_same_time_convention_as_a_laboratory_value():
 
     task = CXRMultimodalMIMIC4(window_hours=24)
     assert task.input_schema["cxr"][0] == "time_image"
+
+
+def test_sunlab_accepts_resized_images_as_well_as_images(tmp_path):
+    """The resized set holds flattened ``{dicom_id}.jpg`` files under
+    ``resized_images``. Requiring a directory literally named ``images`` failed
+    on a complete 377,110-image cohort.
+    """
+    import pandas as pd
+    from pyhealth.datasets.mimic4 import MIMIC4CXRSunlabDataset
+
+    root = tmp_path / "cxr"
+    (root / "resized_images").mkdir(parents=True)
+    pd.DataFrame(
+        {"dicom_id": ["abc123"], "StudyTime": ["123045.0"]}
+    ).to_csv(root / "mimic-cxr-2.0.0-metadata.csv", index=False)
+
+    MIMIC4CXRSunlabDataset.prepare_metadata(
+        object.__new__(MIMIC4CXRSunlabDataset), str(root)
+    )
+
+    out = pd.read_csv(root / "mimic-cxr-2.0.0-metadata-pyhealth-sunlab.csv")
+    path = str(out["image_path"].iloc[0])
+    assert path.endswith(f"resized_images{os.sep}abc123.jpg") or path.endswith(
+        "resized_images/abc123.jpg"
+    )
+    assert str(out["studytime"].iloc[0]).zfill(6) == "123045"
+
+
+def test_sunlab_reports_both_directory_names_when_neither_exists(tmp_path):
+    import pandas as pd
+    from pyhealth.datasets.mimic4 import MIMIC4CXRSunlabDataset
+
+    root = tmp_path / "cxr"
+    root.mkdir()
+    pd.DataFrame(
+        {"dicom_id": ["abc123"], "StudyTime": ["1"]}
+    ).to_csv(root / "mimic-cxr-2.0.0-metadata.csv", index=False)
+
+    with pytest.raises(FileNotFoundError, match="resized_images"):
+        MIMIC4CXRSunlabDataset.prepare_metadata(
+            object.__new__(MIMIC4CXRSunlabDataset), str(root)
+        )
+
