@@ -256,3 +256,26 @@ def test_sunlab_reports_both_directory_names_when_neither_exists(tmp_path):
             object.__new__(MIMIC4CXRSunlabDataset), str(root)
         )
 
+
+
+def test_the_image_channel_count_comes_from_the_processor():
+    """The unified embedding sizes its patch embedding from
+    ``processor.in_channels``. Without that attribute it fell back to 3 while a
+    greyscale CXR task produced 1, and the mismatch surfaced only at the first
+    forward pass:
+
+        RuntimeError: Given groups=1, weight of size [128, 3, 16, 16],
+        expected input[16, 1, 224, 224] to have 3 channels
+    """
+    from pyhealth.processors import TimeImageProcessor
+
+    assert TimeImageProcessor(image_size=224, mode="L").in_channels == 1
+    assert TimeImageProcessor(image_size=224, mode="RGB").in_channels == 3
+
+
+def test_a_placeholder_image_has_the_same_channels_as_a_real_one():
+    from pyhealth.processors import TimeImageProcessor
+
+    for mode in ("L", "RGB"):
+        processor = TimeImageProcessor(image_size=64, mode=mode)
+        assert processor._zero_image_tensor().shape[0] == processor.in_channels

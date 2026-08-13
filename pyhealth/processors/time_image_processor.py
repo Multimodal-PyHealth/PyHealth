@@ -178,6 +178,26 @@ class TimeImageProcessor(TemporalFeatureProcessor):
             c = 3
         return torch.zeros(c, self.image_size, self.image_size)
 
+    @property
+    def in_channels(self) -> int:
+        """Channel count implied by ``mode``.
+
+        The unified embedding sizes its patch embedding from this. Without it
+        the model defaulted to 3 while a greyscale task produced 1, and the
+        mismatch only appeared at the first forward pass:
+
+            RuntimeError: Given groups=1, weight of size [128, 3, 16, 16],
+            expected input[16, 1, 224, 224] to have 3 channels
+
+        Deriving it here means the two cannot disagree.
+        """
+        # Must match _zero_image_tensor exactly, or a placeholder image would
+        # carry a different channel count from a real one.
+        if self.n_channels is not None:
+            return int(self.n_channels)
+        return {"1": 1, "L": 1, "LA": 2, "RGB": 3, "RGBA": 4}.get(self.mode or "RGB", 3)
+
+
     def _load_single_image(self, path: Union[str, Path]) -> torch.Tensor:
         """Load and transform a single image from disk.
 
