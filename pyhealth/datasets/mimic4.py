@@ -282,12 +282,25 @@ class MIMIC4CXRSunlabDataset(BaseDataset):
                 "Expected existing metadata linked by dicom_id/subject_id/study_id."
             )
 
-        images_dir = os.path.join(root, "images")
-        if not os.path.isdir(images_dir):
+        # The flattened layout appears under more than one directory name
+        # depending on how the set was produced, so accept either rather than
+        # hardcoding one and failing on a complete, correct dataset.
+        candidates = ("images", "resized_images")
+        images_dir = next(
+            (
+                os.path.join(root, name)
+                for name in candidates
+                if os.path.isdir(os.path.join(root, name))
+            ),
+            None,
+        )
+        if images_dir is None:
             raise FileNotFoundError(
-                f"Sunlab images directory not found: {images_dir}. "
-                "Expected flattened image files at images/{dicom_id}.jpg."
+                f"No flattened image directory under {root}. Looked for "
+                f"{', '.join(candidates)}, each expected to hold "
+                "{dicom_id}.jpg."
             )
+        images_subdir = os.path.basename(images_dir)
 
         metadata = pd.read_csv(metadata_path, dtype=str)
 
@@ -314,7 +327,7 @@ class MIMIC4CXRSunlabDataset(BaseDataset):
         metadata[study_time_col] = metadata[study_time_col].apply(normalize_studytime)
 
         metadata["image_path"] = metadata[dicom_col].apply(
-            lambda dicom_id: os.path.join(root, "images", f"{dicom_id}.jpg")
+            lambda dicom_id: os.path.join(root, images_subdir, f"{dicom_id}.jpg")
         )
 
         # Align with existing config conventions by using lowercase headers.
