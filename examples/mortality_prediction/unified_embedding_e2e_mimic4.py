@@ -136,6 +136,7 @@ def _build_base_dataset(args: argparse.Namespace) -> MIMIC4Dataset:
         note_tables=note_tables,
         cxr_root=args.cxr_root if cxr_tables else None,
         cxr_tables=cxr_tables,
+        cxr_variant=args.cxr_variant,
         cache_dir=args.cache_dir,
         dev=args.dev if args.dev else False,
         num_workers=args.num_workers,
@@ -821,6 +822,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ehr-root", type=str, required=True)
     parser.add_argument("--note-root", type=str, default=None)
     parser.add_argument("--cxr-root", type=str, default=None)
+    parser.add_argument(
+        "--cxr-variant",
+        choices=["default", "sunlab"],
+        default="default",
+        help=(
+            "Layout of the CXR root. 'default' reads "
+            "mimic-cxr-2.0.0-metadata-pyhealth.csv and needs a "
+            "studytime_normalized column. 'sunlab' reads the resized set, "
+            "normalises StudyTime itself and derives image paths from "
+            "dicom_id. Choosing the wrong one fails at dataset build with "
+            "KeyError: 'studytime_normalized'."
+        ),
+    )
     parser.add_argument("--cache-dir", type=str, default=None)
     parser.add_argument("--output-dir", type=str, default="./output/unified_e2e")
     parser.add_argument(
