@@ -19,6 +19,7 @@ LAB_TASKS = [
     "ICDLabsMIMIC4",
     "ClinicalNotesICDLabsMIMIC4",
     "ClinicalNotesICDLabsCXRMIMIC4",
+    "NotesLabsMIMIC4",
 ]
 
 

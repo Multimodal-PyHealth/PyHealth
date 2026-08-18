@@ -107,7 +107,7 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         # The task cache key is uuid5 over {**vars(task), schemas}, so a code-only
         # fix leaves every existing cache serving superseded samples in silence.
         # Bump whenever emitted data changes.
-        self.emitted_data_version = 2
+        self.emitted_data_version = 3
 
     @staticmethod
     def _clean_text(text: Optional[str]) -> Optional[str]:
@@ -261,8 +261,7 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         Returns:
             Tuple of (lab_times, lab_values, lab_masks). ``lab_masks`` is a
             parallel boolean tensor where ``True`` means observed and ``False``
-            means imputed with 0.0. Falls back to a single missing placeholder
-            row when no valid lab events are found.
+            means imputed with 0.0. An admission with no labs returns empty lists.
         """
         try:
             import polars as pl
@@ -320,17 +319,7 @@ class BaseMultimodalMIMIC4Task(BaseTask):
                     )
                     lab_values.append(lab_vector)
                     lab_masks.append(lab_mask)
-            else:  # If missing lab for a given admission
-                lab_values.append(
-                    [self.MISSING_FLOAT_TOKEN] * len(self.LAB_CATEGORY_NAMES)
-                )
-                lab_masks.append([False] * len(self.LAB_CATEGORY_NAMES))
-                lab_times.append(self.MISSING_FLOAT_TOKEN)
 
-        if len(lab_values) == 0:  # If missing lab for ALL admissions
-            lab_values.append([self.MISSING_FLOAT_TOKEN] * len(self.LAB_CATEGORY_NAMES))
-            lab_masks.append([False] * len(self.LAB_CATEGORY_NAMES))
-            lab_times.append(self.MISSING_FLOAT_TOKEN)
         return lab_times, lab_values, lab_masks
 
     def _collect_vitals(
@@ -344,7 +333,7 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         Returns:
             Tuple of (vital_times, vital_values, vital_masks).
             vital_masks is parallel boolean: True = observed, False = imputed 0.0.
-            Falls back to a single missing-placeholder row when no valid vitals are found.
+            An admission with no vitals returns empty lists.
         """
         try:
             import polars as pl
@@ -403,13 +392,6 @@ class BaseMultimodalMIMIC4Task(BaseTask):
                     vital_values.append(vital_vector)
                     vital_masks.append(vital_mask)
 
-        if len(vital_values) == 0:
-            vital_values.append(
-                [self.MISSING_FLOAT_TOKEN] * len(self.VITAL_CATEGORY_NAMES)
-            )
-            vital_masks.append([False] * len(self.VITAL_CATEGORY_NAMES))
-            vital_times.append(self.MISSING_FLOAT_TOKEN)
-
         return vital_times, vital_values, vital_masks
 
     def _collect_notes(
@@ -439,9 +421,8 @@ class BaseMultimodalMIMIC4Task(BaseTask):
                 with no matching sections are dropped entirely.
 
         Returns:
-            Tuple of (texts, hours_from_admission). Falls back to
-            ``([MISSING_TEXT_TOKEN], [MISSING_FLOAT_TOKEN])`` when the events
-            list is empty.
+            Tuple of (texts, hours_from_admission). Empty when no notes
+            survive cleaning; the processor then emits zero events.
         """
         notes = patient.get_events(
             event_type=note_event_type,
@@ -571,13 +552,6 @@ class ClinicalNotesMIMIC4(BaseMultimodalMIMIC4Task):
             all_radiology_texts.extend(radiology_texts)
             all_radiology_times_from_admission.extend(radiology_times)
 
-        if not all_discharge_texts:
-            all_discharge_texts = [self.MISSING_TEXT_TOKEN]
-            all_discharge_times_from_admission = [self.MISSING_FLOAT_TOKEN]
-        if not all_radiology_texts:
-            all_radiology_texts = [self.MISSING_TEXT_TOKEN]
-            all_radiology_times_from_admission = [self.MISSING_FLOAT_TOKEN]
-
         discharge_note_times_from_admission = (
             all_discharge_texts,
             all_discharge_times_from_admission,
@@ -586,17 +560,6 @@ class ClinicalNotesMIMIC4(BaseMultimodalMIMIC4Task):
             all_radiology_texts,
             all_radiology_times_from_admission,
         )
-
-        if len(all_discharge_texts) == 0:
-            discharge_note_times_from_admission = (
-                [self.MISSING_TEXT_TOKEN],
-                [self.MISSING_FLOAT_TOKEN],
-            )
-        if len(all_radiology_texts) == 0:
-            radiology_note_times_from_admission = (
-                [self.MISSING_TEXT_TOKEN],
-                [self.MISSING_FLOAT_TOKEN],
-            )
 
         single_patient_longitudinal_record = {
             "patient_id": patient.patient_id,
@@ -766,9 +729,6 @@ class ClinicalNotesICDLabsMIMIC4(BaseMultimodalMIMIC4Task):
                     ).total_seconds() / 3600.0
                 all_icd_codes.append(visit_icd_codes)
                 all_icd_times.append(time_from_previous)
-            else:  # Add missingness token if there are no ICD diagnosis/inpatient procedure codes
-                all_icd_codes.append([self.MISSING_CODE_TOKEN])
-                all_icd_times.append(self.MISSING_FLOAT_TOKEN)
 
             previous_admission_time = admission_time
 
@@ -784,19 +744,6 @@ class ClinicalNotesICDLabsMIMIC4(BaseMultimodalMIMIC4Task):
             all_lab_values.extend(lab_values)
             all_lab_masks.extend(lab_masks)
 
-        if len(all_lab_values) == 0:  # If missing lab for ALL admissions
-            all_lab_values.append(
-                [self.MISSING_FLOAT_TOKEN] * len(self.LAB_CATEGORY_NAMES)
-            )
-            all_lab_masks.append([False] * len(self.LAB_CATEGORY_NAMES))
-            all_lab_times.append(self.MISSING_FLOAT_TOKEN)
-
-        # If all admissions were skipped before ICD collection, ensure a
-        # single placeholder step so StageNetProcessor does not emit None time.
-        if len(all_icd_codes) == 0:
-            all_icd_codes.append([self.MISSING_CODE_TOKEN])
-            all_icd_times.append(self.MISSING_FLOAT_TOKEN)
-
         discharge_note_times_from_admission = (
             all_discharge_texts,
             all_discharge_times_from_admission,
@@ -805,20 +752,6 @@ class ClinicalNotesICDLabsMIMIC4(BaseMultimodalMIMIC4Task):
             all_radiology_texts,
             all_radiology_times_from_admission,
         )
-
-        # Per-admission note fallback happens inside _collect_notes().
-        # This final guard handles the edge case where every admission was
-        # skipped before _collect_notes() was reached.
-        if len(all_discharge_texts) == 0:
-            discharge_note_times_from_admission = (
-                [self.MISSING_TEXT_TOKEN],
-                [self.MISSING_FLOAT_TOKEN],
-            )
-        if len(all_radiology_texts) == 0:
-            radiology_note_times_from_admission = (
-                [self.MISSING_TEXT_TOKEN],
-                [self.MISSING_FLOAT_TOKEN],
-            )
 
         single_patient_longitudinal_record = {
             "patient_id": patient.patient_id,
@@ -968,9 +901,6 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseMultimodalMIMIC4Task):
                     )
                 all_icd_codes.append(visit_icd_codes)
                 all_icd_times.append(time_from_previous)
-            else:
-                all_icd_codes.append([self.MISSING_CODE_TOKEN])
-                all_icd_times.append(self.MISSING_FLOAT_TOKEN)
 
             previous_admission_time = admission_time
 
@@ -1003,24 +933,6 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseMultimodalMIMIC4Task):
                 except AttributeError:
                     continue
 
-        if len(all_lab_values) == 0:
-            all_lab_values.append(
-                [self.MISSING_FLOAT_TOKEN] * len(self.LAB_CATEGORY_NAMES)
-            )
-            all_lab_masks.append([False] * len(self.LAB_CATEGORY_NAMES))
-            all_lab_times.append(self.MISSING_FLOAT_TOKEN)
-
-        # If all admissions were skipped before ICD collection, ensure a
-        # single placeholder step so StageNetProcessor does not emit None time.
-        if len(all_icd_codes) == 0:
-            all_icd_codes.append([self.MISSING_CODE_TOKEN])
-            all_icd_times.append(self.MISSING_FLOAT_TOKEN)
-
-        # time_image processor expects at least one path/time pair.
-        if len(all_cxr_paths) == 0:
-            all_cxr_paths = [self.MISSING_TEXT_TOKEN]
-            all_cxr_times = [self.MISSING_FLOAT_TOKEN]
-
         discharge_note_times_from_admission = (
             all_discharge_texts,
             all_discharge_times_from_admission,
@@ -1029,20 +941,6 @@ class ClinicalNotesICDLabsCXRMIMIC4(BaseMultimodalMIMIC4Task):
             all_radiology_texts,
             all_radiology_times_from_admission,
         )
-
-        # Per-admission note fallback happens inside _collect_notes().
-        # This final guard handles the edge case where every admission was
-        # skipped before _collect_notes() was reached.
-        if len(all_discharge_texts) == 0:
-            discharge_note_times_from_admission = (
-                [self.MISSING_TEXT_TOKEN],
-                [self.MISSING_FLOAT_TOKEN],
-            )
-        if len(all_radiology_texts) == 0:
-            radiology_note_times_from_admission = (
-                [self.MISSING_TEXT_TOKEN],
-                [self.MISSING_FLOAT_TOKEN],
-            )
 
         single_patient_longitudinal_record = {
             "patient_id": patient.patient_id,
@@ -1136,9 +1034,6 @@ class ICDLabsMIMIC4(BaseMultimodalMIMIC4Task):
                     )
                 all_icd_codes.append(visit_icd_codes)
                 all_icd_times.append(time_from_previous)
-            else:
-                all_icd_codes.append([self.MISSING_TEXT_TOKEN])
-                all_icd_times.append(self.MISSING_FLOAT_TOKEN)
 
             previous_admission_time = admission_time
 
@@ -1152,17 +1047,6 @@ class ICDLabsMIMIC4(BaseMultimodalMIMIC4Task):
             all_lab_times.extend(lab_times)
             all_lab_values.extend(lab_values)
             all_lab_masks.extend(lab_masks)
-
-        if len(all_lab_values) == 0:
-            all_lab_values.append(
-                [self.MISSING_FLOAT_TOKEN] * len(self.LAB_CATEGORY_NAMES)
-            )
-            all_lab_masks.append([False] * len(self.LAB_CATEGORY_NAMES))
-            all_lab_times.append(self.MISSING_FLOAT_TOKEN)
-
-        if len(all_icd_codes) == 0:
-            all_icd_codes.append([self.MISSING_TEXT_TOKEN])
-            all_icd_times.append(self.MISSING_FLOAT_TOKEN)
 
         single_patient_longitudinal_record = {
             "patient_id": patient.patient_id,
@@ -1294,12 +1178,8 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
             all_note_texts.extend(note_texts)
             all_note_times.extend(note_times)
 
-            # Labs within the observation window
-            lab_end = (
-                effective_end
-                if self.window_hours is not None
-                else admission_dischtime
-            )
+            # Labs within the observation window of THIS admission.
+            lab_end = self._admission_window_end(admission_time, admission_dischtime)
             lab_times, lab_values, lab_masks = self._collect_labs(
                 patient=patient,
                 admission_time=admission_time,
@@ -1332,28 +1212,7 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
                 if visit_icd_codes:
                     all_icd_codes.append(visit_icd_codes)
                     all_icd_times.append(time_from_previous)
-                else:
-                    all_icd_codes.append([self.MISSING_TEXT_TOKEN])
-                    all_icd_times.append(self.MISSING_FLOAT_TOKEN)
                 previous_admission_time = admission_time
-
-        if not all_lab_values:
-            all_lab_values.append(
-                [self.MISSING_FLOAT_TOKEN] * len(self.LAB_CATEGORY_NAMES)
-            )
-            all_lab_masks.append([False] * len(self.LAB_CATEGORY_NAMES))
-            all_lab_times.append(self.MISSING_FLOAT_TOKEN)
-
-        if self.include_vitals and not all_vital_values:
-            all_vital_values.append(
-                [self.MISSING_FLOAT_TOKEN] * len(self.VITAL_CATEGORY_NAMES)
-            )
-            all_vital_masks.append([False] * len(self.VITAL_CATEGORY_NAMES))
-            all_vital_times.append(self.MISSING_FLOAT_TOKEN)
-
-        if not all_note_texts:
-            all_note_texts = [self.MISSING_TEXT_TOKEN]
-            all_note_times = [self.MISSING_FLOAT_TOKEN]
 
         record: Dict[str, Any] = {
             "patient_id": patient.patient_id,
@@ -1370,9 +1229,6 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
             record["vitals_mask"] = (all_vital_times, all_vital_masks)
 
         if self.include_icd:
-            if not all_icd_codes:
-                all_icd_codes.append([self.MISSING_TEXT_TOKEN])
-                all_icd_times.append(self.MISSING_FLOAT_TOKEN)
             record["icd_codes"] = (all_icd_times, all_icd_codes)
 
         return [record]
@@ -1452,11 +1308,6 @@ class LabsOnlyMIMIC4(BaseMultimodalMIMIC4Task):
             all_lab_times.extend(lab_times)
             all_lab_values.extend(lab_values)
             all_lab_masks.extend(lab_masks)
-
-        if not all_lab_values:
-            all_lab_values.append([self.MISSING_FLOAT_TOKEN] * len(self.LAB_CATEGORY_NAMES))
-            all_lab_masks.append([False] * len(self.LAB_CATEGORY_NAMES))
-            all_lab_times.append(self.MISSING_FLOAT_TOKEN)
 
         return [{
             "patient_id": patient.patient_id,
