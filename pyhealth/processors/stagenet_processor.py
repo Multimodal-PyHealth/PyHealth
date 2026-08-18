@@ -193,9 +193,9 @@ class StageNetProcessor(TemporalFeatureProcessor, TokenProcessorInterface):
 
     def _encode_codes(self, codes: List[str]) -> torch.Tensor:
         """Encode flat code list to indices."""
-        # Handle empty code list - return single padding token
+        # Handle empty code list — zero events, not a fake pad token.
         if len(codes) == 0:
-            return torch.tensor([self.code_vocab["<pad>"]], dtype=torch.long)
+            return torch.zeros((0,), dtype=torch.long)
 
         indices = []
         for code in codes:
@@ -213,10 +213,9 @@ class StageNetProcessor(TemporalFeatureProcessor, TokenProcessorInterface):
         assert self._max_nested_len is not None, "Max nested length must be set during fit()"
         
         # Handle empty nested codes (no visits/events)
-        # Return single padding token with shape (1, max_len)
         if len(nested_codes) == 0:
-            pad_token = self.code_vocab["<pad>"]
-            return torch.tensor([[pad_token] * self._max_nested_len], dtype=torch.long)
+            max_len = self._max_nested_len if self._max_nested_len is not None else 1
+            return torch.zeros((0, max_len), dtype=torch.long)
 
         encoded_sequences = []
         # Use global max length determined during fit

@@ -207,11 +207,13 @@ class TestTimeImageProcessor(unittest.TestCase):
                 (self.rgb_paths[:3], self.times[:2])
             )
 
-    def test_process_empty_paths_raises(self):
-        """ValueError for empty image list."""
-        proc = TimeImageProcessor()
-        with self.assertRaises(ValueError):
-            proc.process(([], []))
+    def test_process_empty_paths_is_zero_events(self):
+        """Empty image list is zero events, not a black placeholder frame."""
+        proc = TimeImageProcessor(image_size=32, mode="L")
+        images, times, tag = proc.process(([], []))
+        self.assertEqual(tuple(images.shape), (0, 1, 32, 32))
+        self.assertEqual(tuple(times.shape), (0,))
+        self.assertEqual(tag, "image")
 
     def test_process_invalid_path_raises(self):
         """FileNotFoundError for nonexistent image."""

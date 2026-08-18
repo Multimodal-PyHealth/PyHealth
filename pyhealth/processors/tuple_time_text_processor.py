@@ -5,7 +5,6 @@ from .base_processor import FeatureProcessor, ModalityType, TemporalFeatureProce
 from . import register_processor
 
 logger = logging.getLogger(__name__)
-_MISSING_TEXT_TOKEN = "[MISSING_TEXT]"
 
 @register_processor("tuple_time_text")
 class TupleTimeTextProcessor(TemporalFeatureProcessor):
@@ -109,18 +108,18 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
             cleaned_texts.append(text)
             cleaned_times.append(t)
 
-        # Fast tokenizer path crashes on empty batches; force a single
-        # missingness token when all notes are empty/malformed.
-        if len(cleaned_texts) == 0:
-            cleaned_texts = [_MISSING_TEXT_TOKEN]
-            cleaned_times = [0.0]
-
         texts = cleaned_texts
         time_diffs = cleaned_times
         time_tensor = torch.tensor(time_diffs, dtype=torch.float32)
 
         if self.tokenizer is not None:
-            # Tokenize the list of texts
+            # Fast tokenizers crash on tokenizer([]). Build empty tensors
+            # ourselves so a patient with no notes is zero events, not a
+            # fake "[MISSING_TEXT]" row whose BERT embedding is a constant
+            # the classifier can use as a mortality feature.
+            if len(texts) == 0:
+                empty = torch.zeros((0, 1), dtype=torch.long)
+                return empty, empty.clone(), empty.clone(), time_tensor, self.type_tag
             encoded = self.tokenizer(
                 texts,
                 padding="max_length" if self.padding else False,
