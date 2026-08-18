@@ -1184,9 +1184,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jamba-transformer-layers", type=int, default=2,
                         help="Number of Transformer (attention) layers in JambaEHR. "
                              "Standard: 1 (a single Jamba block = 1 attn + 1 mamba).")
-    parser.add_argument("--jamba-mamba-layers", type=int, default=6,
+    parser.add_argument("--jamba-mamba-layers", type=int, default=2,
                         help="Number of Mamba (SSM) layers in JambaEHR. "
-                             "Standard: 1 (a single Jamba block = 1 attn + 1 mamba).")
+                             "Default 2, matching the library JambaEHR default.")
 
     return parser.parse_args()
 
