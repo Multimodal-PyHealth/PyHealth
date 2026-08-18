@@ -290,3 +290,31 @@ def test_the_backbone_threads_the_pad_mask_into_the_unified_inputs():
         [True, True, True],
         [True, False, False],
     ]
+
+
+def test_mlp_threads_the_pad_mask_into_the_unified_inputs():
+    from types import SimpleNamespace
+
+    from pyhealth.datasets.utils import PAD_MASK_SUFFIX, collate_fn_dict_with_padding
+    from pyhealth.models.mlp import MLP
+    from pyhealth.processors.stagenet_processor import StageNetTensorProcessor
+
+    batch = [
+        {"labs": (torch.tensor([6.0, 12.0, 24.0]), torch.ones(3, 2))},
+        {"labs": (torch.tensor([6.0]), torch.ones(1, 2))},
+    ]
+    collated = collate_fn_dict_with_padding(batch)
+
+    host = SimpleNamespace(
+        feature_keys=["labs"],
+        device="cpu",
+        dataset=SimpleNamespace(
+            input_processors={"labs": StageNetTensorProcessor()}
+        ),
+    )
+    inputs = MLP._build_unified_inputs(host, collated)
+    assert "pad_mask" in inputs["labs"]
+    assert inputs["labs"]["pad_mask"].tolist() == [
+        [True, True, True],
+        [True, False, False],
+    ]
