@@ -241,6 +241,40 @@ def test_sunlab_accepts_resized_images_as_well_as_images(tmp_path):
     assert str(out["studytime"].iloc[0]).zfill(6) == "123045"
 
 
+def test_sunlab_writes_metadata_to_cache_when_root_is_unwritable(tmp_path):
+    """PhysioNet roots are typically read-only. Writing the derived CSV there
+    raised PermissionError after a complete cohort had already been found.
+    """
+    import pandas as pd
+    from pyhealth.datasets.mimic4 import MIMIC4CXRSunlabDataset
+
+    root = tmp_path / "cxr"
+    (root / "resized_images").mkdir(parents=True)
+    pd.DataFrame(
+        {"dicom_id": ["abc"], "StudyTime": ["93000"], "subject_id": ["1"]}
+    ).to_csv(root / "mimic-cxr-2.0.0-metadata.csv", index=False)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    os.chmod(root, 0o555)
+    try:
+        dest = MIMIC4CXRSunlabDataset.prepare_metadata(
+            object.__new__(MIMIC4CXRSunlabDataset),
+            str(root),
+            cache_dir=str(cache),
+        )
+    finally:
+        os.chmod(root, 0o755)
+
+    assert dest.startswith(str(cache))
+    assert Path(dest).is_file()
+    assert not (root / "mimic-cxr-2.0.0-metadata-pyhealth-sunlab.csv").exists()
+    written = pd.read_csv(dest)
+    path = str(written.loc[0, "image_path"])
+    assert path.endswith(f"resized_images{os.sep}abc.jpg") or path.endswith(
+        "resized_images/abc.jpg"
+    )
+
+
 def test_sunlab_reports_both_directory_names_when_neither_exists(tmp_path):
     import pandas as pd
     from pyhealth.datasets.mimic4 import MIMIC4CXRSunlabDataset
