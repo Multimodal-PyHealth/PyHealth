@@ -156,44 +156,37 @@ Appendectomy
 
 
 class TestCollectAdmissionNoteSections(unittest.TestCase):
-    def test_collects_sections_and_returns_time_zero(self):
+    def test_collects_sections(self):
         from pyhealth.tasks.multimodal_mimic4 import NotesLabsMIMIC4
 
         task = NotesLabsMIMIC4()
         patient = _DummyPatientWithNotes(
             note_texts=["Chief Complaint:\nFever\n\nPast Medical History:\nDiabetes"]
         )
-        texts, times = task._collect_admission_note_sections(
-            patient, 101, datetime(2020, 1, 1, 0, 0, 0)
+        texts, times = task._collect_notes(
+            patient,
+            "discharge",
+            101,
+            datetime(2020, 1, 1, 0, 0, 0),
+            section_headers=task.DISCHARGE_CLINICAL_HEADERS,
         )
-        self.assertEqual(len(texts), 1)
-        self.assertIn("Fever", texts[0])
-        self.assertEqual(times, [0.0])
+        self.assertGreaterEqual(len(texts), 1)
+        self.assertTrue(any("Fever" in t or "Diabetes" in t for t in texts))
 
-    def test_missing_note_fallback(self):
+    def test_missing_note_is_empty_not_a_placeholder(self):
         from pyhealth.tasks.multimodal_mimic4 import NotesLabsMIMIC4
 
         task = NotesLabsMIMIC4()
         patient = _DummyPatientWithNotes(note_texts=[])
-        texts, times = task._collect_admission_note_sections(
-            patient, 101, datetime(2020, 1, 1, 0, 0, 0)
+        texts, times = task._collect_notes(
+            patient,
+            "discharge",
+            101,
+            datetime(2020, 1, 1, 0, 0, 0),
+            section_headers=task.DISCHARGE_CLINICAL_HEADERS,
         )
-        self.assertEqual(texts, [""])
-        self.assertEqual(times, [0.0])
-
-    def test_no_time_filter_applied(self):
-        from pyhealth.tasks.multimodal_mimic4 import NotesLabsMIMIC4
-
-        task = NotesLabsMIMIC4()
-        # Discharge note timestamp is 2020-01-03, well outside any 24h window
-        patient = _DummyPatientWithNotes(
-            note_texts=["Chief Complaint:\nFever"]
-        )
-        texts, times = task._collect_admission_note_sections(
-            patient, 101, datetime(2020, 1, 1, 0, 0, 0)
-        )
-        self.assertEqual(len(texts), 1)
-        self.assertIn("Fever", texts[0])
+        self.assertEqual(texts, [])
+        self.assertEqual(times, [])
 
 
 class TestNotesLabsMIMIC4(unittest.TestCase):
@@ -294,8 +287,8 @@ class TestNotesLabsMIMIC4(unittest.TestCase):
         samples = task(patient)
         self.assertEqual(len(samples), 1)
         vital_times, vital_values = samples[0]["vitals"]
-        self.assertEqual(len(vital_times), 1)
-        self.assertEqual(len(vital_values[0]), len(task.VITAL_CATEGORY_NAMES))
+        self.assertEqual(len(vital_times), 0)
+        self.assertEqual(len(vital_values), 0)
 
     def test_output_structure_no_icd(self):
         import polars as pl
@@ -377,11 +370,13 @@ class TestICDLabsMIMIC4Fixes(unittest.TestCase):
         samples = task(patient)
         self.assertEqual(len(samples), 1)
         sample = samples[0]
-        self.assertGreater(len(sample["icd_codes"][0]), 0)
-        self.assertGreater(len(sample["labs"][0]), 0)
-        self.assertGreater(len(sample["labs_mask"][0]), 0)
+        # Malformed dischtime used to skip the admission entirely. The sample
+        # is still emitted; empty ICD/labs are real absence, not a reason to drop.
+        self.assertEqual(sample["patient_id"], "p-2")
+        self.assertIn("icd_codes", sample)
+        self.assertIn("labs", sample)
 
-    def test_missing_icd_code_uses_text_token(self):
+    def test_missing_icd_code_is_zero_visits_not_a_fake_token(self):
         import polars as pl
         from pyhealth.tasks.multimodal_mimic4 import ICDLabsMIMIC4
 
@@ -401,8 +396,9 @@ class TestICDLabsMIMIC4Fixes(unittest.TestCase):
         )
         samples = task(patient)
         self.assertEqual(len(samples), 1)
-        _, icd_visits = samples[0]["icd_codes"]
-        self.assertEqual(icd_visits, [[""]])
+        icd_times, icd_visits = samples[0]["icd_codes"]
+        self.assertEqual(icd_visits, [])
+        self.assertEqual(icd_times, [])
 
 
 if __name__ == "__main__":

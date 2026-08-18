@@ -122,23 +122,21 @@ def test_tokenizer_integration_in_pyhealth_workflow():
 
 
 @pytest.mark.skipif(not TRANSFORMERS_AVAILABLE, reason="Transformers not installed")
-def test_tuple_time_text_processor_with_tokenizer_empty_input_fallback():
-    """Tokenizer mode should handle empty/malformed note batches gracefully."""
+def test_tuple_time_text_processor_with_tokenizer_empty_input_is_zero_events():
+    """Tokenizer mode emits a (0, 1) tensor, not a one-row [MISSING_TEXT] encoding."""
     processor = TupleTimeTextProcessor(
         tokenizer_model="prajjwal1/bert-tiny",
         max_length=8,
     )
 
-    # Empty texts and invalid timestamps should fallback to one missing token.
     input_ids, attention_mask, token_type_ids, time_tensor, tag = processor.process(
         (["", "   ", None], ["bad", None, "nan"])
     )
 
-    assert input_ids.shape == (1, 8)
-    assert attention_mask.shape == (1, 8)
-    assert token_type_ids.shape == (1, 8)
-    assert time_tensor.shape == (1,)
-    assert torch.equal(time_tensor, torch.tensor([0.0]))
+    assert input_ids.shape == (0, 1)
+    assert attention_mask.shape == (0, 1)
+    assert token_type_ids.shape == (0, 1)
+    assert time_tensor.shape == (0,)
     assert tag == "note"
 
 
