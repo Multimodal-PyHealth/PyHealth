@@ -73,7 +73,7 @@ class JambaLayer(nn.Module):
     Args:
         feature_size (int): Hidden dimension shared by all layers.
         num_transformer_layers (int): Number of attention layers. Default 2.
-        num_mamba_layers (int): Number of SSM layers. Default 6.
+        num_mamba_layers (int): Number of SSM layers. Default 2.
         heads (int): Attention heads for Transformer layers. Default 4.
         dropout (float): Dropout rate for Transformer layers. Default 0.3.
         state_size (int): SSM state size for Mamba layers. Default 16.
@@ -94,7 +94,7 @@ class JambaLayer(nn.Module):
         self,
         feature_size: int,
         num_transformer_layers: int = 2,
-        num_mamba_layers: int = 6,
+        num_mamba_layers: int = 2,
         heads: int = 4,
         dropout: float = 0.3,
         state_size: int = 16,
@@ -187,7 +187,7 @@ class JambaEHR(BaseModel):
         dataset (SampleDataset): Dataset providing processed inputs.
         embedding_dim (int): Embedding and hidden dimension. Default 128.
         num_transformer_layers (int): Transformer layers per stream. Default 2.
-        num_mamba_layers (int): Mamba layers per stream. Default 6.
+        num_mamba_layers (int): Mamba layers per stream. Default 2.
         heads (int): Attention heads per Transformer block. Default 4.
         dropout (float): Dropout rate. Default 0.3.
         state_size (int): SSM state size in Mamba blocks. Default 16.
@@ -237,7 +237,7 @@ class JambaEHR(BaseModel):
         dataset: SampleDataset,
         embedding_dim: int = 128,
         num_transformer_layers: int = 2,
-        num_mamba_layers: int = 6,
+        num_mamba_layers: int = 2,
         heads: int = 4,
         dropout: float = 0.3,
         state_size: int = 16,
