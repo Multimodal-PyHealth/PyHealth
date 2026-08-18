@@ -8,6 +8,8 @@ import torch
 import litdata
 from dateutil.parser import parse as dateutil_parse
 from torch.nn.utils.rnn import pad_sequence
+
+from pyhealth.datasets.collate import _pad_stack
 from torch.utils.data import DataLoader
 
 from pyhealth import BASE_CACHE_PATH
@@ -251,6 +253,13 @@ def collate_fn_dict(batch: List[dict]) -> dict:
     return {key: [d[key] for d in batch] for key in batch[0]}
 
 
+#: Suffix of the batch key that records which event slots are real.
+#: Deliberately not "mask": a field may carry its own ``{field}_mask`` meaning
+#: "was this value observed", which is a different question from "is this slot
+#: real".
+PAD_MASK_SUFFIX = "__pad_mask"
+
+
 def collate_fn_dict_with_padding(batch: List[dict]) -> dict:
     """Collates a batch of data into a dictionary with padding for tensor values.
 
@@ -276,6 +285,7 @@ def collate_fn_dict_with_padding(batch: List[dict]) -> dict:
             transposed = list(zip(*values))
             collated_elems = []
 
+            event_lengths: Optional[List[int]] = None
             for elem_vals in transposed:
                 first = elem_vals[0]
 
@@ -286,17 +296,29 @@ def collate_fn_dict_with_padding(batch: List[dict]) -> dict:
                     if all(v.shape == tensor_vals[0].shape for v in tensor_vals):
                         collated_elems.append(torch.stack(tensor_vals))
                     else:
-                        collated_elems.append(
-                            pad_sequence(
-                                tensor_vals,
-                                batch_first=True,
-                                padding_value=0,
-                            )
-                        )
+                        # Padding is created HERE and nowhere else, so only here
+                        # can it be recorded. A padded slot carries value 0.0 and
+                        # time 0.0, which is indistinguishable from a real
+                        # measurement taken at admission time, so a model given
+                        # no mask reads padding as data.
+                        if event_lengths is None:
+                            event_lengths = [v.shape[0] for v in tensor_vals]
+                        # pad_sequence only pads dim 0 and needs every
+                        # trailing dim to match. Tokenised notes are
+                        # (n_notes, seq_len) and, once the text processor pads
+                        # to the longest note in a sample rather than to a
+                        # fixed max_length, BOTH dims vary across samples.
+                        collated_elems.append(_pad_stack(tensor_vals))
                 else:
                     collated_elems.append(list(elem_vals))
 
             collated[key] = tuple(collated_elems)
+            if event_lengths is not None:
+                lengths = torch.tensor(event_lengths)
+                width = int(lengths.max())
+                collated[f"{key}{PAD_MASK_SUFFIX}"] = (
+                    torch.arange(width)[None, :] < lengths[:, None]
+                )
 
         # PyG Data objects (graph processor output)
         elif HAS_PYG and isinstance(values[0], PyGData):

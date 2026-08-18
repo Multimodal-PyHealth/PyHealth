@@ -168,23 +168,15 @@ class EmbeddingModel(BaseModel):
                 ),
             ):
                 vocab_size = len(processor.code_vocab)
-
-                # For NestedSequenceProcessor and DeepNestedSequenceProcessor, don't use padding_idx
-                # because empty visits/groups need non-zero embeddings.
-                if isinstance(
-                    processor, (NestedSequenceProcessor, DeepNestedSequenceProcessor)
-                ):
-                    self.embedding_layers[field_name] = nn.Embedding(
-                        num_embeddings=vocab_size,
-                        embedding_dim=embedding_dim,
-                        padding_idx=None,
-                    )
-                else:
-                    self.embedding_layers[field_name] = nn.Embedding(
-                        num_embeddings=vocab_size,
-                        embedding_dim=embedding_dim,
-                        padding_idx=0,
-                    )
+                # Keep padding_idx=0 so the pad row receives no gradients.
+                # Nested empty visits used to request padding_idx=None because
+                # a fake pad visit needed a non-zero embedding; empty is now
+                # zero events, so the pad row can stay frozen zeros.
+                self.embedding_layers[field_name] = nn.Embedding(
+                    num_embeddings=vocab_size,
+                    embedding_dim=embedding_dim,
+                    padding_idx=0,
+                )
 
                 # Optional pretrained initialization (e.g., GloVe).
                 if pretrained_emb_path is not None:

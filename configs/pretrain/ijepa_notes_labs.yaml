@@ -1,0 +1,7 @@
+_inherit: base.yaml
+
+method: ijepa
+task: notes_labs
+num_target_blocks: 6
+target_block_len: 3
+output_dir: ./output/pretrain/ijepa_notes_labs

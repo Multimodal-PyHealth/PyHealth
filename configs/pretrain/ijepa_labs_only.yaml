@@ -1,0 +1,7 @@
+_inherit: base.yaml
+
+method: ijepa
+task: labs_only
+num_target_blocks: 4
+target_block_len: 4
+output_dir: ./output/pretrain/ijepa_labs_only

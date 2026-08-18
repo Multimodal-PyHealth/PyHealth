@@ -49,6 +49,7 @@ import warnings
 from typing import Any, Optional
 
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
 
 from ...processors.base_processor import ModalityType, TemporalFeatureProcessor
@@ -207,10 +208,25 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         patch_size: int = 16,
         field_embeddings: Optional[dict[str, Any]] = None,
         freeze_text_encoder: bool = False,
+        normalize_content: bool = True,
+        cache_frozen_text: bool = True,
+        max_frozen_text_cache: int = 200_000,
+        numeric_standardizers: Optional[dict[str, Any]] = None,
     ):
         super().__init__()
         self._embedding_dim = embedding_dim
         self._freeze_text_encoder = freeze_text_encoder
+        # A frozen encoder gives the same output for the same tokens, so its
+        # [CLS] vector can come from a cache. Record which fields are frozen,
+        # because the cache must never be used for a trainable encoder.
+        self._frozen_text_fields: set[str] = set()
+        self.cache_frozen_text = cache_frozen_text
+        self.max_frozen_text_cache = max_frozen_text_cache
+        self._frozen_text_cache: dict[str, dict[int, torch.Tensor]] = {}
+        self.normalize_content = normalize_content
+        # Statistics live in buffers, so they travel in state_dict. A checkpoint
+        # therefore applies at inference the same transform it trained under.
+        self.numeric_standardizers = nn.ModuleDict(numeric_standardizers or {})
         _field_embeddings = field_embeddings or {}
 
         self.encoders: nn.ModuleDict = nn.ModuleDict()
@@ -337,6 +353,7 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
             if freeze:
                 for p in pre_built.transformer.parameters():
                     p.requires_grad = False
+                self._frozen_text_fields.add(field_name)
             pre_dim = getattr(pre_built, "embedding_dim", embedding_dim)
             _set_projection(pre_dim, pre_built.fc)
             return
@@ -348,6 +365,7 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
             if freeze:
                 for p in bert.parameters():
                     p.requires_grad = False
+                self._frozen_text_fields.add(field_name)
             self.encoders[field_name] = bert
             hidden = bert.config.hidden_size
             if hidden != embedding_dim:
@@ -419,6 +437,100 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
 
     # ── Forward ───────────────────────────────────────────────────────────────
 
+    def _encode_text_cls(
+        self,
+        field_name: str,
+        encoder: nn.Module,
+        flat_ids: torch.Tensor,
+        flat_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Return the ``[CLS]`` vector for each row, from a cache when possible.
+
+        A frozen encoder gives the same output for the same tokens, so a run of
+        50 epochs repeated the identical forward pass of 110 million parameters
+        50 times.
+
+        The cache has three conditions. It is used only for a field in
+        ``_frozen_text_fields``, so a trainable encoder can never read it. The
+        key contains the token identifiers AND the attention mask, so a change
+        of tokenizer or of truncation budget gives a different key instead of an
+        incorrect result. The cache has a maximum size, and it calculates a row
+        again when the cache is full.
+        """
+        if not (self.cache_frozen_text and field_name in self._frozen_text_fields):
+            out = encoder(input_ids=flat_ids, attention_mask=flat_mask)
+            return out.last_hidden_state[:, 0, :]
+
+        cache = self._frozen_text_cache.setdefault(field_name, {})
+        ids_cpu = flat_ids.detach().cpu()
+        mask_cpu = (
+            flat_mask.detach().cpu().to(torch.int8)
+            if flat_mask is not None
+            else torch.zeros_like(ids_cpu, dtype=torch.int8)
+        )
+        # Key on the REAL tokens only. The collator pads each row to the widest
+        # note in its batch, and batch composition changes every epoch because
+        # the loader shuffles, so a key over the padded row gives the same note
+        # a different key each epoch and the cache never hits. Measured on the
+        # full-scale notes run: epoch time did not fall after epoch 1
+        # (3458s, 3936s, 4048s, 3835s) because every lookup missed.
+        keys = [
+            hash(tuple(i[m.bool()].tolist())) if m.any() else hash(tuple(i.tolist()))
+            for i, m in zip(ids_cpu, mask_cpu)
+        ]
+
+        # Take each absent key one time only. A missing note is a constant
+        # placeholder, so one batch holds many identical rows.
+        first_row_of_key: dict[int, int] = {}
+        for k, key in enumerate(keys):
+            if key not in cache and key not in first_row_of_key:
+                first_row_of_key[key] = k
+        missing = list(first_row_of_key.values())
+        if missing:
+            index = torch.tensor(missing, device=flat_ids.device)
+            with torch.no_grad():
+                out = encoder(
+                    input_ids=flat_ids.index_select(0, index),
+                    attention_mask=(
+                        flat_mask.index_select(0, index)
+                        if flat_mask is not None
+                        else None
+                    ),
+                )
+                fresh = out.last_hidden_state[:, 0, :].detach()
+            for slot, row in zip(missing, fresh):
+                if len(cache) < self.max_frozen_text_cache:
+                    cache[keys[slot]] = row.cpu()
+
+        rows = []
+        for k, key in enumerate(keys):
+            hit = cache.get(key)
+            if hit is None:
+                with torch.no_grad():
+                    out = encoder(
+                        input_ids=flat_ids[k : k + 1],
+                        attention_mask=(
+                            flat_mask[k : k + 1] if flat_mask is not None else None
+                        ),
+                    )
+                rows.append(out.last_hidden_state[0, 0, :].detach())
+            else:
+                rows.append(hit.to(flat_ids.device))
+        return torch.stack(rows).to(dtype=self.type_embedding.weight.dtype)
+
+    def train(self, mode: bool = True) -> "UnifiedMultimodalEmbeddingModel":
+        """Keep a frozen text encoder in eval mode.
+
+        ``nn.Module.train()`` would enable dropout inside the encoder. Its output
+        would then change between passes even though every weight has
+        ``requires_grad=False``. That makes the cache incorrect, and it also
+        makes a frozen encoder give a different answer for the same input.
+        """
+        super().train(mode)
+        for field_name in self._frozen_text_fields:
+            self.encoders[field_name].eval()
+        return self
+
     def forward(
         self,
         inputs: dict[str, dict[str, torch.Tensor]],
@@ -450,7 +562,15 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         for field_name, feat_dict in inputs.items():
             value = feat_dict["value"]  # (B, N_i, ...) or (B, S, F)
             time = feat_dict["time"]  # (B, N_i)
+            # Three different masks meet here and must not be conflated.
+            #   mask      token level, from the processor schema; this is the
+            #             attention mask a text encoder needs.
+            #   pad_mask  event level, from the collator; which slots are real
+            #             events rather than batch padding.
+            #   {field}_mask  a separate FIELD meaning "was this value
+            #             observed", consumed by the standardiser below.
             mask = feat_dict.get("mask")
+            pad_mask = feat_dict.get("pad_mask")
 
             if time is None:
                 # Fallback: treat every event as occurring at t=0
@@ -512,8 +632,9 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
                 b, n, l = value.shape
                 flat_ids = value.view(b * n, l)
                 flat_mask = mask.view(b * n, l) if mask is not None else None
-                out = encoder(input_ids=flat_ids, attention_mask=flat_mask)
-                cls_emb = out.last_hidden_state[:, 0, :]  # (B*N, H)
+                cls_emb = self._encode_text_cls(
+                    field_name, encoder, flat_ids, flat_mask
+                )  # (B*N, H)
                 if field_name in self.projections:
                     cls_emb = self.projections[field_name](cls_emb)
                 emb = cls_emb.view(b, n, -1)  # (B, N, E')
@@ -526,10 +647,51 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
                 emb = img_emb.view(b, n, -1)  # (B, N, E')
 
             else:  # NUMERIC / SIGNAL
+                # Standardise BEFORE the projection. The projection mixes the
+                # features, so a transform after it cannot correct a feature
+                # whose physical unit gives it 300 times the magnitude of
+                # another.
+                standardizer = (
+                    self.numeric_standardizers[field_name]
+                    if field_name in self.numeric_standardizers
+                    else None
+                )
+                if standardizer is not None:
+                    # Observation flags live in the sibling ``{field}_mask``
+                    # FIELD, not in this field's dict. Reading the padding mask
+                    # here would tell the standardiser that every real event
+                    # was measured, which is exactly the distinction the
+                    # standardiser exists to preserve.
+                    sibling = inputs.get(f"{field_name}_mask")
+                    obs = sibling["value"] if isinstance(sibling, dict) else None
+                    if obs is None:
+                        raise ValueError(
+                            f"The standardiser for {field_name!r} needs a paired "
+                            f"{field_name}_mask field in the batch."
+                        )
+                    if obs.shape != value.shape:
+                        raise ValueError(
+                            f"{field_name}_mask has shape {tuple(obs.shape)}, "
+                            f"which does not match {field_name} "
+                            f"{tuple(value.shape)}."
+                        )
+                    value = standardizer(value, obs.bool())
                 emb = encoder(value)  # (B, T, E')
 
             # ── Build event-level validity mask ───────────────────────────
-            if mask is None:
+            if pad_mask is not None:
+                # The collator is authoritative about batch padding.
+                event_mask = pad_mask.to(emb.device).float()
+                if event_mask.shape[1] != emb.shape[1]:
+                    # A nested CODE field was flattened to (B, S*C); repeat the
+                    # event flags along the same axis.
+                    repeat = emb.shape[1] // event_mask.shape[1]
+                    event_mask = (
+                        event_mask.unsqueeze(-1)
+                        .expand(-1, -1, repeat)
+                        .reshape(emb.shape[0], -1)
+                    )
+            elif mask is None:
                 event_mask = torch.ones(emb.shape[:2], device=emb.device)
             else:
                 if mask.dim() > time.dim():
@@ -556,7 +718,19 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         cat_types = torch.cat(all_types, dim=1)  # (B, S_total)
 
         # ── Sort by time ──────────────────────────────────────────────────
-        sort_idx = cat_time.argsort(dim=1)
+        # Padding carries time 0.0, so a plain ascending sort places it BEFORE
+        # every real event. Three consumers then read it: RNNLayer packs the
+        # first ``mask.sum()`` steps, ``get_last_visit`` indexes
+        # ``mask.sum() - 1``, and TransformerLayer takes position 0 as its CLS
+        # vector. Push invalid slots past every real one to keep the sequence
+        # left-aligned, which is what all three assume.
+        #
+        # Stable, because the key is heavily tied: all padding shares time 0.0
+        # and events from one admission share offsets. An unstable sort makes
+        # event order differ between torch builds and between CPU and CUDA,
+        # silently changing RNN and Mamba outputs.
+        sort_key = cat_time.masked_fill(~cat_mask.bool(), float("inf"))
+        sort_idx = sort_key.argsort(dim=1, stable=True)
         cat_emb = cat_emb.gather(1, sort_idx.unsqueeze(-1).expand_as(cat_emb))
         cat_time = cat_time.gather(1, sort_idx)
         cat_mask = cat_mask.gather(1, sort_idx)
@@ -565,7 +739,19 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         # ── Add time + type embeddings ────────────────────────────────────
         time_emb = self.time_embed(cat_time)  # (B, S_total, E')
         type_emb = self.type_embedding(cat_types)  # (B, S_total, E')
-        final = cat_emb + time_emb + type_emb  # (B, S_total, E')
+        if self.normalize_content:
+            # Put the content term on the scale of the additive terms. Without
+            # this the sum is decided by whichever modality has the larger
+            # magnitude, which is an accident of feature scaling and not a
+            # modelling decision. Measured at embedding_dim=128: text content
+            # norm 3.2, raw laboratory content norm 761.4, time and type
+            # together 13. F.layer_norm without weight or bias adds NO
+            # parameters, so an existing checkpoint still loads.
+            cat_emb = F.layer_norm(cat_emb, (cat_emb.shape[-1],))
+        final = cat_emb + time_emb + type_emb
+        # Zero the padded slots so a consumer that ignores the mask, such as a
+        # mean pool, still cannot pick them up.
+        final = final * cat_mask.unsqueeze(-1).to(final.dtype)  # (B, S_total, E')
 
         return {
             "sequence": final,  # (B, S_total, E')
