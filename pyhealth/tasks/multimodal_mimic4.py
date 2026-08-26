@@ -484,7 +484,7 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
 
     Args:
         window_hours: Hours from admission for lab collection. ``None``
-            collects for the full admission span. Default: 24.
+            collects for the full admission span. Default: None.
         include_icd: When ``True``, collect discharge-coded ICD codes and add
             ``icd_codes`` to the sample dict / input schema. Default: ``False``.
     """
@@ -846,7 +846,7 @@ class LabsMIMIC4(BaseMultimodalMIMIC4Task):
 
     Args:
         window_hours: Hours from admission to collect lab measurements.
-            ``None`` collects for the full admission span. Default: 24.
+            ``None`` collects for the full admission span. Default: None.
     """
 
     PADDING: int = 0
@@ -859,7 +859,7 @@ class LabsMIMIC4(BaseMultimodalMIMIC4Task):
     }
     output_schema: ClassVar[Dict] = {"mortality": "binary"}
 
-    def __init__(self, window_hours: Optional[float] = 24) -> None:
+    def __init__(self, window_hours: Optional[float] = None) -> None:
         super().__init__(window_hours=window_hours)
 
     def __call__(self, patient: Any) -> List[Dict[str, Any]]:  # type: ignore[override]
