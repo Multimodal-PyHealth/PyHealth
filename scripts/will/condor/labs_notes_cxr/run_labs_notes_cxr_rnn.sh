@@ -24,21 +24,20 @@ CACHE_DIR="${CACHE_DIR:-/shared/rsaas/wp14/pyhealth_cache_labs_notes_cxr}"
 OUTPUT_DIR="${OUTPUT_DIR:-/home/wp14/output}"
 CONDA_SH="${CONDA_SH:-}"
 
-DEV_MODE="${DEV_MODE:-1}"
+DEV_MODE="${DEV_MODE:-0}"
 EMBEDDING_DIM="${EMBEDDING_DIM:-128}"
 HIDDEN_DIM="${HIDDEN_DIM:-128}"
 RNN_TYPE="${RNN_TYPE:-GRU}"
 RNN_LAYERS="${RNN_LAYERS:-2}"
 DROPOUT="${DROPOUT:-0.1}"
-EPOCHS="${EPOCHS:-15}"
+EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
-LR="${LR:-1e-3}"
+LR="${LR:-1e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-5}"
 PATIENCE="${PATIENCE:-5}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 FREEZE_ENCODER="${FREEZE_ENCODER:-1}"
-INCLUDE_VITALS="${INCLUDE_VITALS:-0}"
-USE_AMP="${USE_AMP:-0}"
+USE_AMP="${USE_AMP:-1}"
 AMP_DTYPE="${AMP_DTYPE:-bf16}"
 
 # Condor GPU cgroups can expose a truncated CUDA_VISIBLE_DEVICES UUID that
@@ -172,10 +171,6 @@ fi
 
 if [[ "${FREEZE_ENCODER}" == "1" ]]; then
     COMMON+=(--freeze-encoder)
-fi
-
-if [[ "${INCLUDE_VITALS}" == "1" ]]; then
-    COMMON+=(--include-vitals)
 fi
 
 if [[ "${USE_AMP}" == "1" ]]; then
