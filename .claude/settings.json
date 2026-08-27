@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Bash(nvidia-smi*)",
+      "Bash(sleep *)",
+      "Bash(cat *)",
+      "Bash(chmod *)",
+      "Bash(*)",
+      "Write(*)",
+      "Edit(*)"
+    ]
+  }
+}
