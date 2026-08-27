@@ -121,7 +121,7 @@ def _build_base_dataset(args: argparse.Namespace) -> MIMIC4Dataset:
         cxr_kwargs = dict(
             cxr_root=args.cxr_root,
             cxr_variant=args.cxr_variant,
-            cxr_tables=["metadata", "negbio", "chexpert", "split"],
+            cxr_tables=["metadata"],
         )
 
     return MIMIC4Dataset(

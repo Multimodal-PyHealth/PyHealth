@@ -207,19 +207,28 @@ class TestTimeImageProcessor(unittest.TestCase):
                 (self.rgb_paths[:3], self.times[:2])
             )
 
-    def test_process_empty_paths_raises(self):
-        """ValueError for empty image list."""
-        proc = TimeImageProcessor()
-        with self.assertRaises(ValueError):
-            proc.process(([], []))
+    def test_process_empty_paths_are_zero_events(self):
+        proc = TimeImageProcessor(image_size=32, mode="RGB")
+        images, timestamps, tag = proc.process(([], []))
+        self.assertEqual(images.shape[0], 0)
+        self.assertEqual(tuple(timestamps.shape), (0,))
+        self.assertEqual(tag, "image")
 
-    def test_process_invalid_path_raises(self):
-        """FileNotFoundError for nonexistent image."""
-        proc = TimeImageProcessor()
-        with self.assertRaises(FileNotFoundError):
-            proc.process(
-                (["/nonexistent/img.png"], [0.0])
-            )
+    def test_process_missing_file_is_skipped(self):
+        proc = TimeImageProcessor(image_size=32, mode="RGB")
+        images, timestamps, _ = proc.process(
+            (["/nonexistent/img.png"], [0.0])
+        )
+        self.assertEqual(images.shape[0], 0)
+        self.assertEqual(tuple(timestamps.shape), (0,))
+
+    def test_process_keeps_real_images_when_a_path_is_missing(self):
+        proc = TimeImageProcessor(image_size=32, mode="RGB")
+        images, timestamps, _ = proc.process(
+            ([self.rgb_paths[0], "/nonexistent/img.png"], [0.0, 1.0])
+        )
+        self.assertEqual(images.shape[0], 1)
+        self.assertEqual(float(timestamps[0]), 0.0)
 
     # ---- Path types ----
 

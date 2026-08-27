@@ -731,20 +731,29 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
             elif modality == ModalityType.IMAGE:
                 # encoder = Sequential(PatchEmbedding, _MeanPool) → (B*N, E')
                 b, n, c, h, w = value.shape
-                flat_imgs = value.reshape(b * n, c, h, w)
-                if pad_mask is not None:
-                    valid = pad_mask.reshape(b * n).bool()
+                if n == 0:
+                    # Empty CXR sequences (no studies, or every path missing
+                    # on disk). ``reshape(0, -1)`` is illegal.
+                    emb = value.new_zeros((b, 0, self._embedding_dim))
                 else:
-                    valid = flat_imgs.reshape(b * n, -1).abs().sum(dim=-1) > 0
-                if valid.any():
-                    img_valid = encoder(flat_imgs[valid])
-                    img_emb = img_valid.new_zeros(
-                        (b * n, img_valid.shape[-1])
-                    )
-                    img_emb[valid] = img_valid
-                else:
-                    img_emb = value.new_zeros((b * n, self._embedding_dim))
-                emb = img_emb.view(b, n, -1)  # (B, N, E')
+                    flat_imgs = value.reshape(b * n, c, h, w)
+                    if pad_mask is not None:
+                        valid = pad_mask.reshape(b * n).bool()
+                    else:
+                        valid = (
+                            flat_imgs.reshape(b * n, -1).abs().sum(dim=-1) > 0
+                        )
+                    if valid.any():
+                        img_valid = encoder(flat_imgs[valid])
+                        img_emb = img_valid.new_zeros(
+                            (b * n, img_valid.shape[-1])
+                        )
+                        img_emb[valid] = img_valid
+                    else:
+                        img_emb = value.new_zeros(
+                            (b * n, self._embedding_dim)
+                        )
+                    emb = img_emb.view(b, n, -1)  # (B, N, E')
 
             else:  # NUMERIC / SIGNAL
                 # Standardise BEFORE the projection. The projection mixes the

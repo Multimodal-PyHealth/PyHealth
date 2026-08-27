@@ -178,34 +178,37 @@ class TimeImageProcessor(TemporalFeatureProcessor):
             c = 3
         return torch.zeros(c, self.image_size, self.image_size)
 
-    def _load_single_image(self, path: Union[str, Path]) -> torch.Tensor:
+    def _load_single_image(self, path: Union[str, Path]) -> Optional[torch.Tensor]:
         """Load and transform a single image from disk.
 
-        If path equals missing_path_token, returns a zero tensor of
-        the same shape as a normal image (C, H, W) via _zero_image_tensor.
-
-        Called internally by process() for each image path in
-        the input list.
-
-        Args:
-            path: Path to the image file. If this equals
-                missing_path_token, a zero-filled placeholder tensor
-                is returned instead.
-
-        Returns:
-            Transformed image tensor of shape (C, H, W).
-
-        Raises:
-            FileNotFoundError: If the image file does not exist.
+        The padding sentinel (empty string in the CXR schema) is the
+        explicit missingness token: a black frame. A path that is not
+        on disk is skipped instead, so an incomplete PhysioNet tree
+        does not abort ``set_task``.
         """
         if self.padding is not None and str(path) == self.padding:
             return self._zero_image_tensor()
         image_path = Path(path)
         if not image_path.exists():
-            raise FileNotFoundError(f"Image file not found: {image_path}")
+            return None
         with Image.open(image_path) as img:
             img.load()
             return self.transform(img)
+
+    def _empty_batch(self) -> Tuple[torch.Tensor, torch.Tensor, str]:
+        if self.n_channels is not None:
+            c = self.n_channels
+        elif self.mode == "L":
+            c = 1
+        elif self.mode == "RGBA":
+            c = 4
+        else:
+            c = 3
+        images = torch.zeros(
+            (0, c, self.image_size, self.image_size), dtype=torch.float32
+        )
+        timestamps = torch.zeros((0,), dtype=torch.float32)
+        return images, timestamps, "image"
 
     def fit(self, samples: Iterable[Dict[str, Any]], field: str) -> None:
         """Fit the processor by inferring n_channels from data.
@@ -279,7 +282,6 @@ class TimeImageProcessor(TemporalFeatureProcessor):
         Raises:
             ValueError: If image_paths and time_diffs have
                 different lengths.
-            FileNotFoundError: If any image file does not exist.
         """
         image_paths, time_diffs = value
 
@@ -290,19 +292,7 @@ class TimeImageProcessor(TemporalFeatureProcessor):
                 f"match."
             )
         if len(image_paths) == 0:
-            if self.n_channels is not None:
-                c = self.n_channels
-            elif self.mode == "L":
-                c = 1
-            elif self.mode == "RGBA":
-                c = 4
-            else:
-                c = 3
-            images = torch.zeros(
-                (0, c, self.image_size, self.image_size), dtype=torch.float32
-            )
-            timestamps = torch.zeros((0,), dtype=torch.float32)
-            return images, timestamps, "image"
+            return self._empty_batch()
 
         paired = sorted(zip(time_diffs, image_paths), key=lambda x: x[0])
 
@@ -312,8 +302,14 @@ class TimeImageProcessor(TemporalFeatureProcessor):
         timestamps = []
         image_tensors = []
         for t, p in paired:
-            image_tensors.append(self._load_single_image(p))
+            tensor = self._load_single_image(p)
+            if tensor is None:
+                continue
+            image_tensors.append(tensor)
             timestamps.append(t)
+
+        if not image_tensors:
+            return self._empty_batch()
 
         images = torch.stack(image_tensors, dim=0)
         timestamps = torch.tensor(timestamps, dtype=torch.float32)
