@@ -47,6 +47,9 @@ from .mortality_prediction_stagenet_mimic4 import (
 from .multimodal_mimic4 import (
     ClinicalNotesMIMIC4,
     ClinicalNotesICDLabsMIMIC4,
+    ClinicalNotesICDLabsCXRMIMIC4,
+    ICDLabsMIMIC4,
+    LabsMIMIC4,
     NotesLabsMIMIC4,
 )
 from .patient_linkage import patient_linkage_mimic3_fn
@@ -69,10 +72,5 @@ from .temple_university_EEG_tasks import (
 from .variant_classification import (
     MutationPathogenicityPrediction,
     VariantClassificationClinVar,
-)
-from .multimodal_mimic4 import (
-    ClinicalNotesMIMIC4,
-    ClinicalNotesICDLabsMIMIC4,
-    ClinicalNotesICDLabsCXRMIMIC4,
 )
 from .patient_linkage_mimic3 import PatientLinkageMIMIC3Task

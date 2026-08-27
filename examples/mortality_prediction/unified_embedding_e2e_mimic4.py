@@ -22,6 +22,8 @@ Tasks
     NotesLabsMIMIC4: admission-context note sections + labs, no ICD codes.
     Extracts Chief Complaint, HPI, PMH, Medications on Admission from the
     discharge note — text available at admission time, ~90%+ coverage.
+    Also includes in-window radiology reports (Indication, Impression
+    sections), bounded to the observation window rather than timestamp 0.0.
     Requires --note-root.
     Add --freeze-encoder to freeze Bio_ClinicalBERT and train only the
     backbone; cuts BERT VRAM by ~50%, useful on smaller GPUs (≤24 GB).
@@ -65,8 +67,6 @@ from pyhealth.datasets import (
     MIMIC4Dataset,
     get_dataloader,
     sample_balanced,
-    sample_oversample,
-    sample_weighted,
     split_by_patient,
     split_by_sample,
 )
@@ -78,6 +78,7 @@ from pyhealth.tasks import MortalityPredictionStageNetMIMIC4
 from pyhealth.tasks.multimodal_mimic4 import (
     ClinicalNotesICDLabsMIMIC4,
     ICDLabsMIMIC4,
+    LabsMIMIC4,
     NotesLabsMIMIC4,
 )
 from pyhealth.trainer import Trainer
@@ -93,8 +94,17 @@ def _build_base_dataset(args: argparse.Namespace) -> MIMIC4Dataset:
             raise ValueError("--task clinical_notes_icd_labs requires --note-root.")
         note_tables = ["discharge", "radiology"]
 
+    if args.task == "notes_labs":
+        if not args.note_root:
+            raise ValueError("--task notes_labs requires --note-root.")
+        note_tables = ["discharge", "radiology"]
+        ehr_tables = ["diagnoses_icd", "procedures_icd", "labevents"] if args.icd_codes else ["labevents"]
+
     if args.task == "icd_labs":
         ehr_tables = ["diagnoses_icd", "procedures_icd", "labevents"]
+
+    if args.task == "labs":
+        ehr_tables = ["labevents"]
 
     return MIMIC4Dataset(
         ehr_root=args.ehr_root,
@@ -120,6 +130,8 @@ def _build_task(args: argparse.Namespace):
             include_icd=args.icd_codes,
             include_vitals=args.include_vitals,
         )
+    if args.task == "labs":
+        return LabsMIMIC4(window_hours=args.observation_window_hours)
     raise ValueError(f"Unknown task: {args.task}")
 
 
@@ -276,17 +288,6 @@ def run(args: argparse.Namespace) -> Path:
         train_ds = sample_balanced(train_ds, ratio=ratio, seed=args.seed, label_key=label_key)
         print(f"[sampling] Training size after undersample: {len(train_ds)}")
 
-    elif strategy == "oversample":
-        ratio = args.balanced_ratio
-        print(f"[sampling] Oversampling positives -> pos:neg 1:{ratio}")
-        train_ds = sample_oversample(train_ds, ratio=ratio, seed=args.seed, label_key=label_key)
-        print(f"[sampling] Training size after oversample: {len(train_ds)}")
-
-    elif strategy == "weighted":
-        print("[sampling] Weighted resampling (class-proportional, with replacement)")
-        train_ds = sample_weighted(train_ds, seed=args.seed, label_key=label_key)
-        print(f"[sampling] Training size after weighted resample: {len(train_ds)}")
-
     model = _build_model(args, sample_dataset)
 
     # Apply class-imbalance correction via BCE pos_weight.
@@ -316,9 +317,22 @@ def run(args: argparse.Namespace) -> Path:
     exp_name = f"{args.model}_seed{args.seed}"
     output_dir = Path(args.output_dir)
 
+    wandb_run = None
+    if args.wandb:
+        import wandb
+
+        tags = args.wandb_tags.split(",") if args.wandb_tags else [args.task, args.model]
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name or exp_name,
+            tags=tags,
+            config=vars(args),
+        )
+
     trainer = Trainer(
         model=model,
-        metrics=["pr_auc", "roc_auc", "f1", "f1_opt", "accuracy"],
+        metrics=["pr_auc", "roc_auc", "f1", "accuracy"],
         device=args.device,
         enable_logging=True,
         output_path=str(output_dir),
@@ -353,7 +367,7 @@ def run(args: argparse.Namespace) -> Path:
     optimizer_params["lr"] = effective_lr
 
     if args.epochs > 0 and len(train_ds) > 0:
-        trainer.train(
+        metrics_history = trainer.train(
             train_dataloader=train_loader,
             val_dataloader=val_loader,
             epochs=args.epochs,
@@ -363,7 +377,16 @@ def run(args: argparse.Namespace) -> Path:
             monitor="pr_auc",
             load_best_model_at_last=True,
             patience=args.patience,
+            use_amp=args.use_amp,
+            amp_dtype=args.amp_dtype,
         )
+        if wandb_run is not None:
+            for epoch_record in metrics_history:
+                wandb_run.log(epoch_record, step=epoch_record["epoch"])
+
+    if wandb_run is not None and test_loader is not None:
+        test_scores = trainer.evaluate(test_loader)
+        wandb_run.log({f"test_{k}": v for k, v in test_scores.items()})
 
     inference_loader = test_loader or val_loader or train_loader
     y_true, y_prob, _, patient_ids = trainer.inference(
@@ -372,6 +395,11 @@ def run(args: argparse.Namespace) -> Path:
 
     output_csv = output_dir / exp_name / f"predictions_{args.model}.csv"
     _write_predictions(output_csv, patient_ids, y_true, y_prob)
+
+    if wandb_run is not None:
+        wandb_run.log({"pos_weight": pw_value})
+        wandb_run.finish()
+
     return output_csv
 
 
@@ -387,7 +415,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--task",
         type=str,
-        choices=["icd_labs", "clinical_notes_icd_labs"],
+        choices=["stagenet", "icd_labs", "clinical_notes_icd_labs", "labs", "notes_labs"],
         default="stagenet",
         help=(
             "notes_labs: admission-context text (CC/HPI/PMH/MedsOnAdm) + labs. "
@@ -429,6 +457,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument(
+        "--use-amp",
+        action="store_true",
+        help="Enable automatic mixed precision training to reduce GPU memory usage.",
+    )
+    parser.add_argument(
+        "--amp-dtype",
+        type=str,
+        default="bf16",
+        choices=["bf16", "fp16"],
+        help="AMP dtype when --use-amp is set. bf16 is more stable (default).",
+    )
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--patience", type=int, default=None)
@@ -475,7 +515,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Freeze pretrained BERT text encoder weights and train only the "
             "downstream backbone (MLP/RNN/Transformer head + projection layer). "
-            "Reduces VRAM by ~50% for the text branch; useful when GPU memory "
+            "Reduces VRAM by ~50%% for the text branch; useful when GPU memory "
             "is limited or for faster iteration on backbone architectures."
         ),
     )
@@ -505,20 +545,18 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help=(
             "Negatives per positive in the balanced training set. "
-            "Default: 1.0 (equal pos/neg). Used with undersample and oversample strategies."
+            "Default: 1.0 (equal pos/neg). Only used with --balanced-sampling."
         ),
     )
     parser.add_argument(
         "--sampling-strategy",
         type=str,
         default="none",
-        choices=["none", "undersample", "oversample", "weighted"],
+        choices=["none", "undersample"],
         help=(
             "Training-set class balance strategy. "
             "'none': no resampling (default). "
             "'undersample': drop majority-class (neg) samples via sample_balanced(). "
-            "'oversample': duplicate minority-class (pos) samples via sample_oversample(). "
-            "'weighted': class-proportional resampling w/ replacement via sample_weighted(). "
             "--balanced-sampling is a legacy alias for 'undersample'."
         ),
     )
@@ -545,6 +583,28 @@ def parse_args() -> argparse.Namespace:
             "Gradient clipping max norm. Default is model-specific: None for "
             "non-BT models, 0.5 for bottleneck_transformer."
         ),
+    )
+
+    # W&B logging
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        default=False,
+        help="Log training/eval metrics to Weights & Biases.",
+    )
+    parser.add_argument("--wandb-project", type=str, default="pyhealth-mortality")
+    parser.add_argument("--wandb-entity", type=str, default=None)
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=None,
+        help="Defaults to '{model}_seed{seed}' if unset.",
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        type=str,
+        default=None,
+        help="Comma-separated wandb tags, e.g. 'labs,rnn'. Defaults to '{task},{model}' if unset.",
     )
 
     # Mamba / JambaEHR-specific
