@@ -82,6 +82,38 @@ class TestFrozenTextCache(unittest.TestCase):
         self.assertEqual(h1.shape[0], 2)
         self.assertEqual(h3.shape[0], 1)
 
+    def test_full_cache_recomputes_uncached_notes(self):
+        model = _numeric_model(cache_frozen_text=True, max_frozen_text_cache=1)
+        enc = CountingEnc()
+        model.encoders["notes"] = enc
+        model._frozen_text_fields.add("notes")
+
+        ids_a = torch.tensor([[1, 2, 3]])
+        mask_a = torch.tensor([[1, 1, 1]])
+        model._encode_text_cls("notes", enc, ids_a, mask_a)
+        self.assertEqual(enc.calls, 1)
+        ids_b = torch.tensor([[4, 5, 6]])
+        mask_b = torch.tensor([[1, 1, 1]])
+        model._encode_text_cls("notes", enc, ids_b, mask_b)
+        after_b = enc.calls
+        self.assertGreater(after_b, 1)
+        model._encode_text_cls("notes", enc, ids_a, mask_a)
+        self.assertEqual(enc.calls, after_b)
+
+    def test_uncapped_cache_keeps_every_unique_note(self):
+        model = _numeric_model(cache_frozen_text=True, max_frozen_text_cache=None)
+        enc = CountingEnc()
+        model.encoders["notes"] = enc
+        model._frozen_text_fields.add("notes")
+
+        ids = torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
+        mask = torch.ones_like(ids)
+        model._encode_text_cls("notes", enc, ids, mask)
+        first = enc.calls
+        self.assertEqual(first, 1)
+        model._encode_text_cls("notes", enc, ids, mask)
+        self.assertEqual(enc.calls, first)
+
 
 if __name__ == "__main__":
     unittest.main()

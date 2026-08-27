@@ -179,6 +179,7 @@ def _build_model(
         processors=sample_dataset.input_processors,
         embedding_dim=args.embedding_dim,
         freeze_text_encoder=args.freeze_encoder,
+        max_frozen_text_cache=args.max_frozen_text_cache,
         numeric_standardizers=numeric_standardizers,
     )
 
@@ -590,6 +591,17 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Freeze pretrained BERT text encoder weights and train only the "
             "downstream backbone (RNN/Transformer head + projection layer). "
+        ),
+    )
+    parser.add_argument(
+        "--max-frozen-text-cache",
+        type=int,
+        default=1_000_000,
+        help=(
+            "Max unique frozen [CLS] vectors on CPU. Default 1e6 (~3 GB "
+            "fp32, ~8 GB with Python overhead). 0 means no cap. The cap is "
+            "a RAM fuse, not what makes the cache fast: speedup needs "
+            "cap >= unique notes. 200k is too small for full MIMIC."
         ),
     )
     parser.add_argument("--rnn-type", type=str, default="GRU")
