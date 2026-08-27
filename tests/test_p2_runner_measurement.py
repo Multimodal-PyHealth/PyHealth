@@ -123,9 +123,10 @@ class TestP2RunnerMeasurement(unittest.TestCase):
         self.assertEqual(args.jamba_transformer_layers, 2)
         self.assertEqual(args.jamba_mamba_layers, 6)
 
-    def test_observation_window_defaults_to_full_stay(self):
+    def test_missingness_flag_defaults_off(self):
         mod = _load_runner()
         args = _parse(mod)
-        self.assertIsNone(args.observation_window_hours)
-        args_24 = _parse(mod, "--observation-window-hours", "24")
-        self.assertEqual(args_24.observation_window_hours, 24)
+        self.assertFalse(args.emit_missing_placeholders)
+        args_on = _parse(mod, "--emit-missing-placeholders")
+        self.assertTrue(args_on.emit_missing_placeholders)
+        self.assertFalse(hasattr(args, "observation_window_hours"))

@@ -3,8 +3,7 @@
 The sample is patient-level: every admission up to the first death is one
 sequence. Event times were hours from *that stay's* admit, then concatenated,
 so stay 2 at +6h sorted with stay 1 at +6h. Collection is still per stay
-(admit through discharge, or admit+window if ``window_hours`` is set). Times
-are hours from the first stay in the sample.
+(admit through discharge). Times are hours from the first stay in the sample.
 
 Admission-context discharge sections are stamped at that stay's admit, not
 at the discharge note's ``charttime``. Radiology stays at exam time.

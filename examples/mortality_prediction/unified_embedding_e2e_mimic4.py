@@ -137,16 +137,13 @@ def _build_base_dataset(args: argparse.Namespace) -> MIMIC4Dataset:
 
 
 def _build_task(args: argparse.Namespace):
+    missing = dict(emit_missing_placeholders=args.emit_missing_placeholders)
     if args.task == "notes_labs":
-        return NotesLabsMIMIC4(
-            window_hours=args.observation_window_hours,
-        )
+        return NotesLabsMIMIC4(**missing)
     if args.task == "notes_labs_cxr":
-        return NotesLabsCXRMIMIC4(
-            window_hours=args.observation_window_hours,
-        )
+        return NotesLabsCXRMIMIC4(**missing)
     if args.task == "labs":
-        return LabsMIMIC4(window_hours=args.observation_window_hours)
+        return LabsMIMIC4(**missing)
     raise ValueError(f"Unknown task: {args.task}")
 
 
@@ -577,12 +574,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--observation-window-hours",
-        type=int,
-        default=None,
+        "--emit-missing-placeholders",
+        action="store_true",
+        default=False,
         help=(
-            "If set, collect labs/CXR/radiology only this many hours from each "
-            "admission. Default: full stay (through discharge)."
+            "Will-on ablation: invent a [MISSING_TEXT] note, a zero lab row, "
+            "and a black CXR frame when a modality is empty. Default (off) "
+            "emits zero-length sequences."
         ),
     )
     parser.add_argument(

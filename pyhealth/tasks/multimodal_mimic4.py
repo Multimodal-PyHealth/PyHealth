@@ -78,24 +78,26 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         # "review of systems",
     ]
 
+    # Fake event used only when emit_missing_placeholders=True (Will-on
+    # ablation). Default table emits empty sequences instead.
+    PLACEHOLDER_TEXT: ClassVar[str] = "[MISSING_TEXT]"
+
     def __init__(
         self,
-        window_hours: Optional[float] = None,
+        emit_missing_placeholders: bool = False,
     ):
-        self.window_hours = window_hours
+        self.emit_missing_placeholders = emit_missing_placeholders
         # Task cache key is uuid5 over {**vars(task), schemas}. Bump when
         # emitted data changes so leaky caches cannot be reused.
         # 1: empty events instead of placeholders; per-admission collection span.
         # 2: CXR/notes_labs_cxr no longer drop later stays against the first
-        #    admission's clock (admission_time >= first_admit + window_hours).
+        #    admission's clock.
         # 3: event times are hours from the first stay in the sample, not
         #    reset per admission (reset times made stay 2 at +6h sort with
         #    stay 1 at +6h).
-        # 4: class/runner default is full stay (window_hours=None);
-        #    admission-context discharge sections stamped at admit, not
-        #    charttime. v3 caches used a 24h class default and discharge
-        #    charttime on those notes.
-        self.emitted_data_version = 4
+        # 4: full stay; admission-context discharge sections stamped at admit.
+        # 5: observation-window API removed; missingness flag is in vars().
+        self.emitted_data_version = 5
 
     @staticmethod
     def _clean_text(text: Optional[str]) -> Optional[str]:
@@ -138,10 +140,10 @@ class BaseMultimodalMIMIC4Task(BaseTask):
     def _hours_since(cls, timestamp: datetime, origin: datetime) -> float:
         """Hours from ``origin`` to ``timestamp``.
 
-        Collection windows stay per admission (full stay, or admit+window
-        when ``window_hours`` is set). The value written onto the unified
-        timeline is hours from the first stay in this sample, so a later
-        stay at +6h does not sort with the first stay at +6h.
+        Collection is per admission, admit through discharge. The value
+        written onto the unified timeline is hours from the first stay in
+        this sample, so a later stay at +6h does not sort with the first
+        stay at +6h.
         """
         return cls._to_hours((timestamp - origin).total_seconds())
 
@@ -162,33 +164,45 @@ class BaseMultimodalMIMIC4Task(BaseTask):
             if dt is not None and (global_end is None or dt > global_end):
                 global_end = dt
 
-        if self.window_hours is not None:
-            effective_start = global_start
-            effective_end = effective_start + timedelta(hours=self.window_hours)
-            return effective_start, effective_end
-
-        effective_start = global_start
-        effective_end = global_end
-
-        return effective_start, effective_end
+        return global_start, global_end
 
     def _admission_window_end(
         self,
         admission_time: datetime,
         admission_dischtime: datetime,
     ) -> datetime:
-        """End of the observation window for one admission.
+        """End of collection for one admission: discharge (full stay)."""
+        return admission_dischtime or admission_time
 
-        Callers previously passed ``admission_dischtime`` directly, so
-        ``window_hours`` was inert and labs were collected through discharge.
-        For a mortality label that reads the outcome. Re-anchor per admission
-        and clamp to discharge so a later stay cannot inherit the first
-        admission's window.
+    def _apply_missing_placeholders(
+        self,
+        note_texts: Optional[List[str]] = None,
+        note_times: Optional[List[float]] = None,
+        lab_values: Optional[List[List[float]]] = None,
+        lab_masks: Optional[List[List[bool]]] = None,
+        lab_times: Optional[List[float]] = None,
+        cxr_paths: Optional[List[str]] = None,
+        cxr_times: Optional[List[float]] = None,
+    ) -> None:
+        """Invent one fake event per empty modality (Will-on ablation).
+
+        Default table leaves empty lists empty. This restores the old
+        ``[MISSING_TEXT]`` note, zero lab row, and empty-path CXR (black
+        frame via ``padding=""``).
         """
-        if self.window_hours is None:
-            return admission_dischtime
-        end = admission_time + timedelta(hours=self.window_hours)
-        return min(end, admission_dischtime) if admission_dischtime else end
+        if not self.emit_missing_placeholders:
+            return
+        n_lab = len(self.LAB_CATEGORY_NAMES)
+        if note_texts is not None and not note_texts:
+            note_texts.append(self.PLACEHOLDER_TEXT)
+            note_times.append(0.0)
+        if lab_values is not None and not lab_values:
+            lab_values.append([self.MISSING_FLOAT_TOKEN] * n_lab)
+            lab_masks.append([False] * n_lab)
+            lab_times.append(0.0)
+        if cxr_paths is not None and not cxr_paths:
+            cxr_paths.append("")
+            cxr_times.append(0.0)
 
     def _build_admissions_to_process(self, patient: Any) -> Tuple[List[Any], int]:
         """Build admissions to process and derive mortality label.
@@ -409,8 +423,8 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
             per admission with inter-admission time offsets.
 
     Args:
-        window_hours: Hours from admission for lab collection. ``None``
-            collects for the full admission span. Default: ``None``.
+        emit_missing_placeholders: When True, empty notes/labs become a fake
+            ``[MISSING_TEXT]`` / zero-lab event. Default False (empty sequences).
         include_icd: When ``True``, collect discharge-coded ICD codes and add
             ``icd_codes`` to the sample dict / input schema. Default: ``False``.
             MIMIC-IV timestamps those codes at ``dischtime``, so this leaks
@@ -440,10 +454,10 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
 
     def __init__(
         self,
-        window_hours: Optional[float] = None,
         include_icd: bool = False,
+        emit_missing_placeholders: bool = False,
     ) -> None:
-        super().__init__(window_hours=window_hours)
+        super().__init__(emit_missing_placeholders=emit_missing_placeholders)
         self.include_icd = include_icd
         schema = dict(self._BASE_INPUT_SCHEMA)
         if include_icd:
@@ -503,7 +517,7 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
             all_note_texts.extend(note_texts)
             all_note_times.extend(note_times)
 
-            # Labs within the observation window of THIS admission.
+            # Labs through discharge of THIS admission.
             lab_end = self._admission_window_end(admission_time, admission_dischtime)
             lab_times, lab_values, lab_masks = self._collect_labs(
                 patient=patient,
@@ -515,7 +529,7 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
             all_lab_values.extend(lab_values)
             all_lab_masks.extend(lab_masks)
 
-            # Radiology notes within the observation window. Unlike the
+            # Radiology notes through discharge of this stay. Unlike the
             # discharge note (a retrospective summary parsed for its
             # admission-context sections), radiology reports are written at
             # exam time, so they're bounded to the same window as labs
@@ -541,6 +555,13 @@ class NotesLabsMIMIC4(BaseMultimodalMIMIC4Task):
                         self._hours_since(admission_time, time_origin)
                     )
 
+        self._apply_missing_placeholders(
+            note_texts=all_note_texts,
+            note_times=all_note_times,
+            lab_values=all_lab_values,
+            lab_masks=all_lab_masks,
+            lab_times=all_lab_times,
+        )
         record: Dict[str, Any] = {
             "patient_id": patient.patient_id,
             "admission_note_times": (all_note_texts, all_note_times),
@@ -579,8 +600,8 @@ class NotesLabsCXRMIMIC4(BaseMultimodalMIMIC4Task):
             per admission with inter-admission time offsets.
 
     Args:
-        window_hours: Hours from admission for lab/CXR collection.
-            ``None`` collects for the full admission span. Default: ``None``.
+        emit_missing_placeholders: When True, empty notes/labs/CXR become a
+            fake ``[MISSING_TEXT]`` / zero-lab / black-frame event. Default False.
         include_icd: When ``True``, collect discharge-coded ICD codes and add
             ``icd_codes`` to the sample dict / input schema. Default: ``False``.
             MIMIC-IV timestamps those codes at ``dischtime``, so this leaks
@@ -618,10 +639,10 @@ class NotesLabsCXRMIMIC4(BaseMultimodalMIMIC4Task):
 
     def __init__(
         self,
-        window_hours: Optional[float] = None,
         include_icd: bool = False,
+        emit_missing_placeholders: bool = False,
     ) -> None:
-        super().__init__(window_hours=window_hours)
+        super().__init__(emit_missing_placeholders=emit_missing_placeholders)
         self.include_icd = include_icd
         schema = dict(self._BASE_INPUT_SCHEMA)
         if include_icd:
@@ -683,7 +704,7 @@ class NotesLabsCXRMIMIC4(BaseMultimodalMIMIC4Task):
             all_note_texts.extend(note_texts)
             all_note_times.extend(note_times)
 
-            # Labs within the observation window of THIS admission.
+            # Labs through discharge of THIS admission.
             lab_end = self._admission_window_end(admission_time, admission_dischtime)
             lab_times, lab_values, lab_masks = self._collect_labs(
                 patient=patient,
@@ -695,7 +716,7 @@ class NotesLabsCXRMIMIC4(BaseMultimodalMIMIC4Task):
             all_lab_values.extend(lab_values)
             all_lab_masks.extend(lab_masks)
 
-            # Radiology notes within the observation window. Unlike the
+            # Radiology notes through discharge of this stay. Unlike the
             # discharge note (a retrospective summary parsed for its
             # admission-context sections), radiology reports are written at
             # exam time, so they're bounded to the same window as labs/CXR
@@ -738,6 +759,15 @@ class NotesLabsCXRMIMIC4(BaseMultimodalMIMIC4Task):
                         self._hours_since(admission_time, time_origin)
                     )
 
+        self._apply_missing_placeholders(
+            note_texts=all_note_texts,
+            note_times=all_note_times,
+            lab_values=all_lab_values,
+            lab_masks=all_lab_masks,
+            lab_times=all_lab_times,
+            cxr_paths=all_cxr_paths,
+            cxr_times=all_cxr_times,
+        )
         record: Dict[str, Any] = {
             "patient_id": patient.patient_id,
             "admission_note_times": (all_note_texts, all_note_times),
@@ -766,8 +796,8 @@ class LabsMIMIC4(BaseMultimodalMIMIC4Task):
     so the same backbone models (MLP, RNN, Transformer, etc.) work unchanged.
 
     Args:
-        window_hours: Hours from admission to collect lab measurements.
-            ``None`` collects for the full admission span. Default: ``None``.
+        emit_missing_placeholders: When True, empty labs become a fake zero
+            row at t=0. Default False (empty sequences).
     """
 
     PADDING: int = 0
@@ -780,8 +810,8 @@ class LabsMIMIC4(BaseMultimodalMIMIC4Task):
     }
     output_schema: ClassVar[Dict] = {"mortality": "binary"}
 
-    def __init__(self, window_hours: Optional[float] = None) -> None:
-        super().__init__(window_hours=window_hours)
+    def __init__(self, emit_missing_placeholders: bool = False) -> None:
+        super().__init__(emit_missing_placeholders=emit_missing_placeholders)
 
     def __call__(self, patient: Any) -> List[Dict[str, Any]]:  # type: ignore[override]
         admissions_to_process, mortality_label = self._build_admissions_to_process(
@@ -823,6 +853,11 @@ class LabsMIMIC4(BaseMultimodalMIMIC4Task):
             all_lab_values.extend(lab_values)
             all_lab_masks.extend(lab_masks)
 
+        self._apply_missing_placeholders(
+            lab_values=all_lab_values,
+            lab_masks=all_lab_masks,
+            lab_times=all_lab_times,
+        )
         single_patient_longitudinal_record = {
             "patient_id": patient.patient_id,
             "labs": (all_lab_times, all_lab_values),
@@ -842,12 +877,11 @@ class CXRMIMIC4(BaseMultimodalMIMIC4Task):
     no notes, no ICD codes, no labs — isolating the chest X-ray
     modality the same way ``LabsMIMIC4`` isolates labs.
 
-    CXR studies are filtered by timestamp (StudyDate+StudyTime, from the
-    ``metadata`` event table) within each admission's observation window.
+    Collection is admit through discharge per stay.
 
     Args:
-        window_hours: Hours from admission to collect CXR studies. ``None``
-            collects for the full admission span. Default: None.
+        emit_missing_placeholders: When True, empty CXR becomes a black
+            frame at t=0. Default False (empty sequences).
     """
 
     task_name: str = "CXRMIMIC4"
@@ -911,6 +945,10 @@ class CXRMIMIC4(BaseMultimodalMIMIC4Task):
                 except AttributeError:
                     continue
 
+        self._apply_missing_placeholders(
+            cxr_paths=all_cxr_paths,
+            cxr_times=all_cxr_times,
+        )
         single_patient_longitudinal_record = {
             "patient_id": patient.patient_id,
             "cxr_image_times": (all_cxr_paths, all_cxr_times),
