@@ -41,3 +41,23 @@ Notes:
   a different epoch).
 - Single seed. JambaEHR peaks at epoch 1; treat the gap to the other backbones as
   provisional until multi-seed.
+- Why 200k was slower than *no* cache: once the cap is reached, misses were encoded in
+  the batched pass, not inserted, then encoded again one row at a time by the assembly
+  loop. Fixed on the PR follow-ups ("Encode a frozen-cache miss once per forward, even
+  when the cache is full"). The 200k row above ran on the pre-fix code.
+
+## Cache-cap sweep and unfrozen BERT (launched 2026-08-28, results pending)
+
+| script | condition | tree |
+|---|---|---|
+| `run_notes_labs_mlp_seed1_cache500k.sh` | frozen BERT, 500k cap | same as 1M cells |
+| `run_notes_labs_mlp_seed1_unfrozen.sh` | BERT trained end-to-end | 1M tree + gradient-checkpointing commit |
+| `run_notes_labs_jambaehr_seed1_unfrozen.sh` | BERT trained end-to-end | same |
+| `run_notes_labs_bottleneck_transformer_seed1_unfrozen.sh` | BERT trained end-to-end | same |
+
+The unfrozen launchers drop `--freeze-encoder` and pass `--text-grad-checkpoint-rows 256`:
+a trainable BERT keeps every note row's activations for the backward pass and one fat batch
+exceeded 47 GB at step 4; the flag turns on per-layer gradient checkpointing and chunks note
+rows through the encoder (math unchanged, ~12.5 GB peak, epoch 0 ≈ 2.1 h vs 191 s frozen+cached).
+Epoch-0 val PR-AUC, unfrozen vs frozen+1M: MLP 0.399 vs 0.498, Bottleneck 0.563 vs 0.609,
+JambaEHR 0.739 vs 0.808 — same lr 1e-4 on all of BERT, single seed, first epoch only.
