@@ -180,6 +180,7 @@ def _build_model(
         embedding_dim=args.embedding_dim,
         freeze_text_encoder=args.freeze_encoder,
         max_frozen_text_cache=args.max_frozen_text_cache,
+        text_grad_checkpoint_rows=args.text_grad_checkpoint_rows,
         numeric_standardizers=numeric_standardizers,
     )
 
@@ -602,6 +603,16 @@ def parse_args() -> argparse.Namespace:
             "fp32, ~8 GB with Python overhead). 0 means no cap. The cap is "
             "a RAM fuse, not what makes the cache fast: speedup needs "
             "cap >= unique notes. 200k is too small for full MIMIC."
+        ),
+    )
+    parser.add_argument(
+        "--text-grad-checkpoint-rows",
+        type=int,
+        default=0,
+        help=(
+            "Trainable text encoder only: enable gradient checkpointing and "
+            "run note rows through BERT in chunks of this size. Bounds "
+            "activation memory; the math is unchanged. 0 disables."
         ),
     )
     parser.add_argument("--rnn-type", type=str, default="GRU")

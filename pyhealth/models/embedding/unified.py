@@ -52,6 +52,7 @@ import logging
 
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as _checkpoint
 import torch.nn as nn
 
 from ...processors.base_processor import ModalityType, TemporalFeatureProcessor
@@ -241,6 +242,7 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         normalize_content: bool = True,
         cache_frozen_text: bool = True,
         max_frozen_text_cache: Optional[int] = 1_000_000,
+        text_grad_checkpoint_rows: int = 0,
         numeric_standardizers: Optional[dict[str, Any]] = None,
     ):
         super().__init__()
@@ -253,6 +255,11 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         self._frozen_text_fields: set[str] = set()
         self.cache_frozen_text = cache_frozen_text
         self.max_frozen_text_cache = max_frozen_text_cache
+        # A trainable text encoder keeps every note row's activations for the
+        # backward pass; one batch with many long notes exceeds 47 GB. When > 0,
+        # the encoder uses per-layer gradient checkpointing and note rows go
+        # through it in chunks of this size under torch checkpoint. Same math.
+        self.text_grad_checkpoint_rows = text_grad_checkpoint_rows
         self._frozen_text_cache: dict[str, dict[int, torch.Tensor]] = {}
         self.image_pool = image_pool
         self.normalize_content = normalize_content
@@ -399,6 +406,8 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
                 for p in bert.parameters():
                     p.requires_grad = False
                 self._frozen_text_fields.add(field_name)
+            elif self.text_grad_checkpoint_rows > 0:
+                bert.gradient_checkpointing_enable()
             self.encoders[field_name] = bert
             hidden = bert.config.hidden_size
             if hidden != embedding_dim:
@@ -512,10 +521,23 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
             )
 
         if not (self.cache_frozen_text and field_name in self._frozen_text_fields):
-            ctx = torch.no_grad() if field_name in self._frozen_text_fields else nullcontext()
-            with ctx:
-                out = encoder(input_ids=flat_ids, attention_mask=flat_mask)
-            return out.last_hidden_state[:, 0, :]
+            frozen = field_name in self._frozen_text_fields
+            rows = self.text_grad_checkpoint_rows
+            if frozen or rows <= 0 or not torch.is_grad_enabled():
+                ctx = torch.no_grad() if frozen else nullcontext()
+                with ctx:
+                    out = encoder(input_ids=flat_ids, attention_mask=flat_mask)
+                return out.last_hidden_state[:, 0, :]
+
+            def _cls(ids: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+                return encoder(input_ids=ids, attention_mask=mask).last_hidden_state[:, 0, :]
+
+            outs = []
+            for start in range(0, flat_ids.shape[0], rows):
+                ids = flat_ids[start : start + rows]
+                mask = flat_mask[start : start + rows] if flat_mask is not None else None
+                outs.append(_checkpoint(_cls, ids, mask, use_reentrant=False))
+            return torch.cat(outs, dim=0)
 
         cache = self._frozen_text_cache.setdefault(field_name, {})
         ids_cpu = flat_ids.detach().cpu()
