@@ -54,7 +54,7 @@ from pyhealth.datasets import (
     split_by_patient,
     split_by_sample,
 )
-from pyhealth.models import RNN, Transformer, UnifiedMultimodalEmbeddingModel
+from pyhealth.models import MLP, RNN, Transformer, UnifiedMultimodalEmbeddingModel
 from pyhealth.models.bottleneck_transformer import BottleneckTransformer
 from pyhealth.models.ehrmamba import EHRMamba
 from pyhealth.models.jamba_ehr import JambaEHR
@@ -162,6 +162,15 @@ def _build_model(args: argparse.Namespace, sample_dataset: Any):
         freeze_text_encoder=args.freeze_encoder,
     )
 
+    if args.model == "mlp":
+        return MLP(
+            dataset=sample_dataset,
+            embedding_dim=args.embedding_dim,
+            hidden_dim=args.hidden_dim,
+            n_layers=args.mlp_layers,
+            activation=args.mlp_activation,
+            unified_embedding=unified,
+        )
     if args.model == "rnn":
         return RNN(
             dataset=sample_dataset,
@@ -377,7 +386,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        choices=["rnn", "transformer", "bottleneck_transformer",
+        choices=["mlp", "rnn", "transformer", "bottleneck_transformer",
                  "ehrmamba", "jambaehr"],
         default="rnn",
     )
@@ -449,6 +458,14 @@ def parse_args() -> argparse.Namespace:
             "downstream backbone (RNN/Transformer head + projection layer). "
         ),
     )
+    parser.add_argument("--mlp-layers", type=int, default=2)
+    parser.add_argument(
+        "--mlp-activation",
+        type=str,
+        default="relu",
+        choices=["relu", "tanh", "sigmoid", "leaky_relu", "elu"],
+    )
+
     parser.add_argument("--rnn-type", type=str, default="GRU")
     parser.add_argument("--rnn-layers", type=int, default=1)
     parser.add_argument("--bidirectional", action="store_true")
