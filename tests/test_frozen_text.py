@@ -100,6 +100,26 @@ class TestFrozenTextCache(unittest.TestCase):
         model._encode_text_cls("notes", enc, ids_a, mask_a)
         self.assertEqual(enc.calls, after_b)
 
+    def test_full_cache_encodes_each_miss_once_per_forward(self):
+        model = _numeric_model(cache_frozen_text=True, max_frozen_text_cache=1)
+        enc = CountingEnc()
+        model.encoders["notes"] = enc
+        model._frozen_text_fields.add("notes")
+
+        model._encode_text_cls(
+            "notes", enc, torch.tensor([[1, 2, 3]]), torch.tensor([[1, 1, 1]])
+        )
+        self.assertEqual(enc.calls, 1)
+        # CountingEnc broadcasts (b, l, 8) * (b, 1), so keep b == l for the
+        # two unique misses it will see.
+        ids = torch.tensor([[4, 5], [7, 8], [4, 5]])
+        mask = torch.ones_like(ids)
+        out = model._encode_text_cls("notes", enc, ids, mask)
+        # One batched call for the two unique misses; no per-row re-encode.
+        self.assertEqual(enc.calls, 2)
+        self.assertEqual(out.shape[0], 3)
+        torch.testing.assert_close(out[0], out[2])
+
     def test_uncapped_cache_keeps_every_unique_note(self):
         model = _numeric_model(cache_frozen_text=True, max_frozen_text_cache=None)
         enc = CountingEnc()
