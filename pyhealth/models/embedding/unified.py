@@ -48,6 +48,7 @@ import math
 import warnings
 from contextlib import nullcontext
 from typing import Any, Optional
+import logging
 
 import torch
 import torch.nn.functional as F
@@ -56,6 +57,13 @@ import torch.nn as nn
 from ...processors.base_processor import ModalityType, TemporalFeatureProcessor
 from .base import BaseEmbeddingModel
 from .vision import PatchEmbedding
+
+logger = logging.getLogger(__name__)
+
+# Frozen [CLS] is 768-d float32 on CPU. Python tensor objects add overhead;
+# treat 8 KB/entry as a conservative host-RAM estimate when logging.
+_CLS_BYTES = 768 * 4
+_CACHE_LOG_SIZES = {1, 10_000, 50_000, 100_000, 200_000, 500_000, 1_000_000, 2_000_000}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -232,7 +240,7 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         freeze_text_encoder: bool = False,
         normalize_content: bool = True,
         cache_frozen_text: bool = True,
-        max_frozen_text_cache: int = 200_000,
+        max_frozen_text_cache: Optional[int] = 1_000_000,
         numeric_standardizers: Optional[dict[str, Any]] = None,
     ):
         super().__init__()
@@ -464,6 +472,10 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
     def embedding_dim(self) -> int:
         return self._embedding_dim
 
+    @property
+    def frozen_text_cache_size(self) -> int:
+        return sum(len(c) for c in self._frozen_text_cache.values())
+
     def _encode_text_cls(
         self,
         field_name: str,
@@ -480,8 +492,11 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         The cache has three conditions. It is used only for a field in
         ``_frozen_text_fields``, so a trainable encoder can never read it. The
         key is the token identifiers under the attention mask, so a change of
-        tokenizer or truncation budget gives a different key. The cache has a
-        maximum size, and it recalculates a row when the cache is full.
+        tokenizer or truncation budget gives a different key. ``None`` or
+        ``<= 0`` means no size cap. Default is 1_000_000 (~3 GB of fp32
+        ``[CLS]`` vectors): a RAM fuse, not a speedup knob. A smaller cap
+        than the unique-note count makes overflow notes re-run BERT every
+        epoch. Notes are never dropped from the sequence.
 
         Key on the REAL tokens only. The collator pads each row to the widest
         note in its batch, and batch composition changes every epoch because
@@ -532,8 +547,21 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
                 )
                 fresh = out.last_hidden_state[:, 0, :].detach()
             for slot, row in zip(missing, fresh):
-                if len(cache) < self.max_frozen_text_cache:
+                cap = self.max_frozen_text_cache
+                if cap is None or cap <= 0 or len(cache) < cap:
                     cache[keys[slot]] = row.cpu()
+                    n = len(cache)
+                    if n in _CACHE_LOG_SIZES or (n > 0 and n % 250_000 == 0):
+                        logger.info(
+                            "frozen text cache field=%s size=%d "
+                            "(~%.2f GB fp32 [CLS] tensors, ~%.2f GB with "
+                            "Python overhead). Overflow is re-encoded next "
+                            "forward; notes are never dropped.",
+                            field_name,
+                            n,
+                            n * _CLS_BYTES / 1e9,
+                            n * 8e3 / 1e9,
+                        )
 
         rows = []
         for k, key in enumerate(keys):
