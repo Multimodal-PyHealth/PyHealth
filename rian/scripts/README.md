@@ -24,12 +24,16 @@ checkpoint. Timings: one RTX A6000 per cell on sunlab-serv-03.
 
 | cell | test PR-AUC | test ROC-AUC | best val PR-AUC (ep) | epoch | total |
 |---|---|---|---|---|---|
-| MLP | 0.566 | 0.944 | 0.593 (16) | 191 s | 1.5 h |
-| Bottleneck Transformer | 0.691 | 0.961 | 0.696 (8) | 224 s | 1.2 h |
+| RNN (GRU, 1 layer) | **0.821** | **0.979** | 0.828 (5) | 241 s | 1.1 h |
 | JambaEHR | 0.808 | 0.975 | 0.820 (1) | 372 s | 1.0 h |
-| RNN | running | | | | |
-| Transformer | running | | | | |
-| EHRMamba | running | | | | |
+| EHRMamba | 0.780 | 0.970 | 0.801 (2) | 246 s | 0.9 h |
+| Bottleneck Transformer | 0.691 | 0.961 | 0.696 (8) | 224 s | 1.2 h |
+| Transformer | 0.686 | 0.945 | 0.679 (7) | 216 s | 1.1 h |
+| MLP | 0.566 | 0.944 | 0.593 (16) | 191 s | 1.5 h |
+
+Epoch = mean train epoch after the cold first one (~1400 s while the cache fills). Single seed.
+Recurrent/SSM backbones (RNN, Jamba, EHRMamba) lead attention backbones by ~0.1 PR-AUC and MLP by
+~0.2 under full-stay collection, where end-of-stay recency is highly informative.
 
 ## Cache cap sweep — MLP, frozen BERT
 
