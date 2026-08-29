@@ -98,9 +98,16 @@ class TestP2RunnerMeasurement(unittest.TestCase):
             output_schema={"label": "binary"},
             in_memory=True,
         )
+        # Default is now to refuse the leaky fallback; --allow-leaky-split opts
+        # back in for smoke tests.
+        with self.assertRaises(RuntimeError):
+            mod._split_dataset(dataset, seed=1)
+
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            _train, _val, _test, mode = mod._split_dataset(dataset, seed=1)
+            _train, _val, _test, mode = mod._split_dataset(
+                dataset, seed=1, allow_leaky_split=True
+            )
         self.assertEqual(mode, "by_sample_fallback_leaky")
         self.assertTrue(any("split_by_sample" in str(w.message) for w in caught))
 

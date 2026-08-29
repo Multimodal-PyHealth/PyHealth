@@ -338,9 +338,17 @@ class TestSplitAndEvalFallback(unittest.TestCase):
             output_schema={"label": "binary"},
             in_memory=True,
         )
+        # The leaky fallback is now opt-in: by default a cohort that cannot be
+        # split by patient stops the run instead of producing numbers where one
+        # patient sits in both train and test.
+        with self.assertRaises(RuntimeError):
+            mod._split_dataset(dataset, seed=1)
+
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            train, val, test, mode = mod._split_dataset(dataset, seed=1)
+            train, val, test, mode = mod._split_dataset(
+                dataset, seed=1, allow_leaky_split=True
+            )
         self.assertEqual(mode, "by_sample_fallback_leaky")
         self.assertTrue(any("split_by_sample" in str(w.message) for w in caught))
         self.assertGreater(len(train) + len(val) + len(test), 0)
@@ -365,6 +373,9 @@ class TestCliAndRunDirs(unittest.TestCase):
             "32",
             "--num_layers",
             "2",
+            # --amp_dtype needs --use-amp: passing it alone is refused rather
+            # than running fp32 with bf16 recorded in the config.
+            "--use-amp",
             "--amp_dtype",
             "bf16",
             "--conv_kernel",
@@ -382,7 +393,15 @@ class TestCliAndRunDirs(unittest.TestCase):
         self.assertEqual(args.mamba_state_size, 16)
         self.assertEqual(args.jamba_mamba_layers, 2)
         self.assertEqual(args.embedding_dim, 128)
-        self.assertFalse(args.use_amp)
+        self.assertTrue(args.use_amp)
+
+    def test_amp_dtype_without_use_amp_is_rejected(self):
+        # This combination used to parse fine and run fp32 while run_config
+        # recorded amp_dtype "bf16" — the Tranche 1 flag list spells it exactly
+        # that way, so it has to fail loudly rather than quietly.
+        mod = _load_runner()
+        with self.assertRaises(SystemExit):
+            _parse(mod, "--amp_dtype", "bf16")
 
     def test_patients_is_rejected(self):
         mod = _load_runner()
