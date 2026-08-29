@@ -20,6 +20,11 @@ CXR_ROOT="${CXR_ROOT:-}"
 FROZEN_TEXT_CACHE="${FROZEN_TEXT_CACHE:-1000000}"
 GPU="${GPU-0}"
 
+# Dataset/task build parallelism. Infrastructure, not protocol: it changes how
+# long the first run takes to materialise the task cache, not what the cache
+# contains. Raise it when building a cold cache (the CXR one is slow).
+NUM_WORKERS="${NUM_WORKERS:-1}"
+
 RUNNER=examples/mortality_prediction/unified_embedding_e2e_mimic4.py
 
 # dim 128/128, dropout 0.1, batch 32, lr 1e-4, 50 epochs, patience 5, bf16 AMP —
@@ -36,6 +41,7 @@ PROTOCOL_FLAGS=(
   --epochs 50 --patience 5
   --seed "$SEED"
   --use-amp --amp-dtype bf16
+  --num-workers "$NUM_WORKERS"
 )
 
 # launch <run name> <runner flag>...
