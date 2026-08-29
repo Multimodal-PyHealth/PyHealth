@@ -1,0 +1,24 @@
+# HTCondor wrapper: runs one metal cell script in the foreground on the assigned GPU.
+#
+#   mkdir -p $TREE/logs/condor
+#   condor_submit CELL=run_notes_labs_jambaehr_seed1.sh TREE=/home/rianatri/ml4h-tranche1-cache1m rian/scripts/condor/cell.sub
+#
+# Memory: the runs load a prebuilt task cache (no dataset build), 64 GB host RAM is ample.
+TREE = /home/rianatri/ml4h-tranche1-cache1m
+
+initialdir          = $(TREE)
+executable          = $(TREE)/rian/scripts/condor/cell.sh
+transfer_executable = False
+arguments           = $(CELL)
+getenv              = True
+environment         = "FOREGROUND=1 GPU= TREE=$(TREE)"
+
+output = $(TREE)/logs/condor/$(CELL)_$(ClusterId).out
+error  = $(TREE)/logs/condor/$(CELL)_$(ClusterId).err
+log    = $(TREE)/logs/condor/$(CELL)_$(ClusterId).log
+
+request_gpus   = 1
+request_cpus   = 4
+request_memory = 65536
+
+queue
