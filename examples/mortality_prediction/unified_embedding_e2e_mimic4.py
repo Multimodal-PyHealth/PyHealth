@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -67,6 +68,8 @@ from pyhealth.tasks.multimodal_mimic4 import (
 )
 from pyhealth.trainer import Trainer
 from pyhealth.utils import set_seed, write_run_config
+
+logger = logging.getLogger(__name__)
 
 
 class WandbLogger:
@@ -137,37 +140,102 @@ def _build_base_dataset(args: argparse.Namespace) -> MIMIC4Dataset:
 
 
 def _build_task(args: argparse.Namespace):
-    missing = dict(emit_missing_placeholders=args.emit_missing_placeholders)
+    common = dict(emit_missing_placeholders=args.emit_missing_placeholders)
     if args.task == "notes_labs":
-        return NotesLabsMIMIC4(**missing)
+        return NotesLabsMIMIC4(**common)
     if args.task == "notes_labs_cxr":
-        return NotesLabsCXRMIMIC4(**missing)
+        return NotesLabsCXRMIMIC4(**common)
     if args.task == "labs":
-        return LabsMIMIC4(**missing)
+        return LabsMIMIC4(**common)
     raise ValueError(f"Unknown task: {args.task}")
 
 
-def _split_dataset(dataset: Any, seed: int) -> Tuple[Any, Any, Any, str]:
-    """Split by patient, falling back to by-sample only if that yields nothing.
+def _split_dataset(
+    dataset: Any, seed: int, allow_leaky_split: bool = False
+) -> Tuple[Any, Any, Any, str]:
+    """Split by patient. Refuse the leaky by-sample fallback unless asked.
 
-    The fallback is leaky: a patient with several admissions can then land in
-    both train and test, which inflates the metrics. It only triggers on tiny
-    cohorts, but it must not trigger silently, so the mode is returned and
-    recorded alongside the run's results.
+    The fallback puts a patient with several admissions in both train and test,
+    which inflates every metric. That used to happen behind a warning, which is
+    the wrong default: a run that cannot be split correctly should stop, not
+    quietly produce numbers nobody can use. ``--allow-leaky-split`` re-enables
+    it for a smoke test, and the mode is recorded in run_config either way.
     """
     train_ds, val_ds, test_ds = split_by_patient(dataset, [0.8, 0.1, 0.1], seed=seed)
-    if len(train_ds) == 0 or len(test_ds) == 0:
-        warnings.warn(
-            "split_by_patient produced an empty split, falling back to "
-            "split_by_sample. The same patient may now appear in train and "
-            "test, so these metrics are optimistic and not comparable to "
-            "patient-split runs.",
-            RuntimeWarning,
-            stacklevel=2,
+    if len(train_ds) > 0 and len(test_ds) > 0:
+        return train_ds, val_ds, test_ds, "by_patient"
+
+    if not allow_leaky_split:
+        raise RuntimeError(
+            f"split_by_patient produced an empty split (train={len(train_ds)}, "
+            f"test={len(test_ds)}) on {len(dataset)} samples. The by-sample "
+            "fallback would put the same patient in train and test, so this "
+            "run is refused. Widen the cohort, or pass --allow-leaky-split if "
+            "you are running a smoke test and know the metrics are garbage."
         )
-        train_ds, val_ds, test_ds = split_by_sample(dataset, [0.8, 0.1, 0.1], seed=seed)
-        return train_ds, val_ds, test_ds, "by_sample_fallback_leaky"
-    return train_ds, val_ds, test_ds, "by_patient"
+
+    warnings.warn(
+        "Falling back to split_by_sample at your request. The same patient may "
+        "now appear in train and test, so these metrics are optimistic and not "
+        "comparable to patient-split runs.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    train_ds, val_ds, test_ds = split_by_sample(dataset, [0.8, 0.1, 0.1], seed=seed)
+    return train_ds, val_ds, test_ds, "by_sample_fallback_leaky"
+
+
+# Architecture flags each backbone actually consumes. Anything else the parser
+# accepts is inert for that model: it is written into run_config and warned
+# about at startup, so a launcher can never appear to set something it did not.
+# ``--dropout`` is absent for mlp on purpose — pyhealth.models.mlp.MLP has no
+# dropout parameter at all.
+_ARCH_FLAGS_USED: Dict[str, Tuple[str, ...]] = {
+    "mlp": ("embedding_dim", "hidden_dim"),
+    "rnn": (
+        "embedding_dim",
+        "hidden_dim",
+        "dropout",
+        "rnn_type",
+        "rnn_layers",
+        "bidirectional",
+    ),
+    "transformer": ("embedding_dim", "dropout", "heads", "num_layers"),
+    "bottleneck_transformer": (
+        "embedding_dim",
+        "dropout",
+        "heads",
+        "num_layers",
+        "bottlenecks_n",
+        "fusion_startidx",
+    ),
+    "ehrmamba": (
+        "embedding_dim",
+        "dropout",
+        "num_layers",
+        "mamba_state_size",
+        "mamba_conv_kernel",
+    ),
+    "jambaehr": (
+        "embedding_dim",
+        "dropout",
+        "heads",
+        "mamba_state_size",
+        "mamba_conv_kernel",
+        "jamba_transformer_layers",
+        "jamba_mamba_layers",
+    ),
+}
+
+_ARCH_FLAGS_ALL: Tuple[str, ...] = tuple(
+    sorted({flag for flags in _ARCH_FLAGS_USED.values() for flag in flags})
+)
+
+
+def _inert_arch_flags(model: str) -> list[str]:
+    """Architecture flags this backbone ignores, as CLI spellings."""
+    used = set(_ARCH_FLAGS_USED[model])
+    return ["--" + f.replace("_", "-") for f in _ARCH_FLAGS_ALL if f not in used]
 
 
 def _build_model(
@@ -289,8 +357,17 @@ def run(args: argparse.Namespace) -> Path:
 
     split_seed = args.seed if args.split_seed is None else args.split_seed
     train_ds, val_ds, test_ds, split_mode = _split_dataset(
-        sample_dataset, seed=split_seed
+        sample_dataset, seed=split_seed, allow_leaky_split=args.allow_leaky_split
     )
+
+    inert_flags = _inert_arch_flags(args.model)
+    if inert_flags:
+        logger.warning(
+            "%s ignores these flags: %s. They are recorded in run_config as "
+            "inert_flags — do not read them as settings that took effect.",
+            args.model,
+            " ".join(inert_flags),
+        )
 
     numeric_standardizers: dict[str, Any] = {}
     if "labs" in sample_dataset.input_processors and not args.no_lab_standardization:
@@ -384,27 +461,16 @@ def run(args: argparse.Namespace) -> Path:
         exp_name=exp_name,
     )
 
-    # BottleneckTransformer is more fragile on full MIMIC-IV with no warmup.
-    # Use safer defaults unless explicitly overridden from CLI.
+    # Optimizer settings come from the CLI only. There used to be a per-model
+    # branch here that quietly gave bottleneck_transformer max_grad_norm=0.5
+    # and Adam eps=1e-6 while every other backbone got 1.0 and 1e-8, which made
+    # the six-backbone comparison not compute-matched and left no trace in
+    # run_config (it recorded the *flag*, which was None, not the resolved eps).
+    # If a model needs different optimizer settings, the launcher must say so.
     effective_lr = args.lr
     effective_max_grad_norm = args.max_grad_norm
-    optimizer_params = {}
-
-    if args.model == "bottleneck_transformer":
-        if effective_lr is None:
-            effective_lr = 1e-4
-        if effective_max_grad_norm is None:
-            effective_max_grad_norm = 0.5
-        optimizer_params["eps"] = args.adam_eps if args.adam_eps is not None else 1e-6
-    else:
-        if effective_lr is None:
-            effective_lr = 1e-4
-        if effective_max_grad_norm is None:
-            effective_max_grad_norm = 1.0
-        if args.adam_eps is not None:
-            optimizer_params["eps"] = args.adam_eps
-
-    optimizer_params["lr"] = effective_lr
+    effective_adam_eps = args.adam_eps
+    optimizer_params = {"lr": effective_lr, "eps": effective_adam_eps}
 
     write_run_config(
         str(output_dir / exp_name),
@@ -412,6 +478,13 @@ def run(args: argparse.Namespace) -> Path:
             **vars(args),
             "resolved_lr": effective_lr,
             "resolved_max_grad_norm": effective_max_grad_norm,
+            "resolved_adam_eps": effective_adam_eps,
+            "inert_flags": inert_flags,
+            # These tasks have no observation-window API on this branch: labs,
+            # radiology and CXR are collected through discharge of every
+            # admission up to and including the one the patient died in. Stated
+            # here so no reader has to infer the protocol from the code.
+            "observation_window": "full_stay_through_discharge",
             "split_mode": split_mode,
             "resolved_split_seed": split_seed,
             "eval_split": eval_split,
@@ -503,17 +576,14 @@ def parse_args() -> argparse.Namespace:
         "--learning_rate",
         dest="lr",
         type=float,
-        default=None,
-        help="Learning rate. Default is 1e-4 for all models.",
+        default=1e-4,
+        help="Learning rate, same for every model.",
     )
     parser.add_argument(
         "--adam-eps",
         type=float,
-        default=None,
-        help=(
-            "Adam epsilon. Default is model-specific: 1e-8 for non-BT models, "
-            "1e-6 for bottleneck_transformer."
-        ),
+        default=1e-8,
+        help="Adam epsilon, same for every model (torch default).",
     )
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--device", type=str, default=None)
@@ -586,6 +656,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--allow-leaky-split",
+        action="store_true",
+        default=False,
+        help=(
+            "Permit the by-sample split fallback when the patient split is "
+            "empty. The same patient can then land in train and test. Smoke "
+            "tests only — the metrics are not usable."
+        ),
+    )
+    parser.add_argument(
         "--freeze-encoder",
         action="store_true",
         default=False,
@@ -634,11 +714,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-grad-norm",
         type=float,
-        default=None,
-        help=(
-            "Gradient clipping max norm. Default is model-specific: None for "
-            "non-BT models, 0.5 for bottleneck_transformer."
-        ),
+        default=1.0,
+        help="Gradient clipping max norm, same for every model.",
     )
 
     parser.add_argument(
