@@ -597,9 +597,12 @@ def parse_args() -> argparse.Namespace:
         "--amp_dtype",
         dest="amp_dtype",
         type=str,
-        default="bf16",
+        default=None,
         choices=["bf16", "fp16"],
-        help="AMP dtype when --use-amp is set. bf16 is more stable (default).",
+        help=(
+            "AMP dtype. Requires --use-amp; passing this alone is an error "
+            "rather than a silently fp32 run. Defaults to bf16 with --use-amp."
+        ),
     )
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument(
@@ -787,6 +790,19 @@ def parse_args() -> argparse.Namespace:
             "--patients is not a supported flag and is not a 5-patient smoke. "
             "Omit it for the full table; use --dev N for a patient-limited run."
         )
+
+    # The Tranche 1 flag list says --amp_dtype "bf16" and never mentions
+    # --use-amp, so following it literally used to give a silently fp32 run with
+    # amp_dtype: "bf16" sitting in run_config. Refuse that combination instead.
+    if args.amp_dtype is not None and not args.use_amp:
+        parser.error(
+            f"--amp-dtype {args.amp_dtype} was passed without --use-amp, so "
+            "mixed precision would be off and the run would be fp32 while the "
+            "config claimed otherwise. Pass --use-amp, or drop --amp-dtype."
+        )
+    if args.amp_dtype is None:
+        args.amp_dtype = "bf16"
+
     return args
 
 
