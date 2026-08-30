@@ -25,6 +25,21 @@ GPU="${GPU-0}"
 # contains. Raise it when building a cold cache (the CXR one is slow).
 NUM_WORKERS="${NUM_WORKERS:-1}"
 
+# CPU threads per cell. These cells are dataloader-bound, not GPU-bound, and
+# torch defaults to 64 intra-op + 128 inter-op threads with nothing pinning
+# them. One cell alone on a quiet box is fine; four cells at once put ~800
+# threads on 128 cores, and measured epoch time went from 191 s to 8600 s with
+# the GPUs sitting at 0-1% utilisation. Pin it, and size it so that
+# THREADS x (cells you launch) stays under the core count you actually have.
+THREADS="${THREADS:-8}"
+export OMP_NUM_THREADS="$THREADS"
+export MKL_NUM_THREADS="$THREADS"
+export OPENBLAS_NUM_THREADS="$THREADS"
+export NUMEXPR_NUM_THREADS="$THREADS"
+# torch's intra-op pool follows OMP_NUM_THREADS. Its inter-op pool does not and
+# has no env var; it still defaults to the core count, so expect roughly
+# THREADS + nproc threads per process rather than exactly THREADS.
+
 RUNNER=examples/mortality_prediction/unified_embedding_e2e_mimic4.py
 
 # dim 128/128, dropout 0.1, batch 32, lr 1e-4, 50 epochs, patience 5, bf16 AMP —
