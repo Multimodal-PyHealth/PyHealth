@@ -253,10 +253,7 @@ def _build_model(args: argparse.Namespace, sample_dataset: Any):
         embedding_dim=args.embedding_dim,
         freeze_text_encoder=args.freeze_encoder,
         max_frozen_text_cache=args.max_frozen_text_cache,
-<<<<<<< HEAD
         text_grad_checkpoint_rows=args.text_grad_checkpoint_rows,
-=======
->>>>>>> 1428144 (Updates)
     )
 
     if args.model == "mlp":
@@ -575,15 +572,6 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Freeze pretrained BERT text encoder weights and train only the "
             "downstream backbone (RNN/Transformer head + projection layer). "
-        ),
-    )
-    parser.add_argument(
-        "--max-frozen-text-cache",
-        type=int,
-        default=200_000,
-        help=(
-            "Max distinct texts to cache per text field when --freeze-encoder "
-            "is set. No effect without --freeze-encoder."
         ),
     )
     parser.add_argument("--mlp-layers", type=int, default=2)
