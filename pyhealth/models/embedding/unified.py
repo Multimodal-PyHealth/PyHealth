@@ -556,6 +556,9 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
             if key not in cache and key not in first_row_of_key:
                 first_row_of_key[key] = k
         missing = list(first_row_of_key.values())
+        # Rows encoded in this forward, kept even when the cache is full so a
+        # miss is never encoded twice in one call.
+        fresh_rows: dict[int, torch.Tensor] = {}
         if missing:
             index = torch.tensor(missing, device=flat_ids.device)
             with torch.no_grad():
@@ -569,6 +572,7 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
                 )
                 fresh = out.last_hidden_state[:, 0, :].detach()
             for slot, row in zip(missing, fresh):
+                fresh_rows[keys[slot]] = row
                 cap = self.max_frozen_text_cache
                 if cap is None or cap <= 0 or len(cache) < cap:
                     cache[keys[slot]] = row.cpu()
@@ -586,17 +590,10 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
                         )
 
         rows = []
-        for k, key in enumerate(keys):
+        for key in keys:
             hit = cache.get(key)
             if hit is None:
-                with torch.no_grad():
-                    out = encoder(
-                        input_ids=flat_ids[k : k + 1],
-                        attention_mask=(
-                            flat_mask[k : k + 1] if flat_mask is not None else None
-                        ),
-                    )
-                rows.append(out.last_hidden_state[0, 0, :].detach())
+                rows.append(fresh_rows[key])
             else:
                 rows.append(hit.to(flat_ids.device))
         return torch.stack(rows).to(dtype=self.type_embedding.weight.dtype)
