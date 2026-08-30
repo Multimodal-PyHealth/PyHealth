@@ -43,6 +43,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import logging
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -65,6 +67,8 @@ from pyhealth.tasks.multimodal_mimic4 import (
 )
 from pyhealth.trainer import Trainer
 from pyhealth.utils import set_seed
+
+logger = logging.getLogger(__name__)
 
 
 class WandbLogger:
@@ -148,14 +152,102 @@ def _build_task(args: argparse.Namespace):
     raise ValueError(f"Unknown task: {args.task}")
 
 
-def _split_dataset(dataset: Any, seed: int) -> Tuple[Any, Any, Any]:
+def _split_dataset(
+    dataset: Any, seed: int, allow_leaky_split: bool = False
+) -> Tuple[Any, Any, Any]:
+    """Split by patient. Refuse the leaky by-sample fallback unless asked.
+
+    The fallback puts a patient with several admissions in both train and test,
+    which inflates every metric, and it used to happen with no warning at all.
+    A run that cannot be split correctly should stop rather than quietly produce
+    numbers nobody can use.
+    """
     train_ds, val_ds, test_ds = split_by_patient(dataset, [0.8, 0.1, 0.1], seed=seed)
-    if len(train_ds) == 0 or len(test_ds) == 0:
-        train_ds, val_ds, test_ds = split_by_sample(dataset, [0.8, 0.1, 0.1], seed=seed)
-    return train_ds, val_ds, test_ds
+    if len(train_ds) > 0 and len(test_ds) > 0:
+        return train_ds, val_ds, test_ds
+
+    if not allow_leaky_split:
+        raise RuntimeError(
+            f"split_by_patient produced an empty split (train={len(train_ds)}, "
+            f"test={len(test_ds)}) on {len(dataset)} samples. The by-sample "
+            "fallback would put the same patient in train and test, so this "
+            "run is refused. Widen the cohort, or pass --allow-leaky-split if "
+            "you are running a smoke test and know the metrics are garbage."
+        )
+
+    warnings.warn(
+        "Falling back to split_by_sample at your request. The same patient may "
+        "now appear in train and test, so these metrics are optimistic and not "
+        "comparable to patient-split runs.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return split_by_sample(dataset, [0.8, 0.1, 0.1], seed=seed)
+
+
+# Architecture flags each backbone actually consumes. Anything else the parser
+# accepts is inert for that model and is warned about at startup, so a launcher
+# can never appear to set something that never reached the model. --dropout is
+# absent for mlp on purpose: pyhealth.models.mlp.MLP has no dropout parameter,
+# and it takes **kwargs, so passing one is swallowed rather than rejected.
+_ARCH_FLAGS_USED: Dict[str, Tuple[str, ...]] = {
+    "mlp": ("embedding_dim", "hidden_dim", "mlp_layers", "mlp_activation"),
+    "rnn": (
+        "embedding_dim",
+        "hidden_dim",
+        "dropout",
+        "rnn_type",
+        "rnn_layers",
+        "bidirectional",
+    ),
+    "transformer": ("embedding_dim", "dropout", "heads", "num_layers"),
+    "bottleneck_transformer": (
+        "embedding_dim",
+        "dropout",
+        "heads",
+        "num_layers",
+        "bottlenecks_n",
+        "fusion_startidx",
+    ),
+    "ehrmamba": (
+        "embedding_dim",
+        "dropout",
+        "num_layers",
+        "mamba_state_size",
+        "mamba_conv_kernel",
+    ),
+    "jambaehr": (
+        "embedding_dim",
+        "dropout",
+        "heads",
+        "mamba_state_size",
+        "mamba_conv_kernel",
+        "jamba_transformer_layers",
+        "jamba_mamba_layers",
+    ),
+}
+
+_ARCH_FLAGS_ALL: Tuple[str, ...] = tuple(
+    sorted({flag for flags in _ARCH_FLAGS_USED.values() for flag in flags})
+)
+
+
+def _inert_arch_flags(model: str) -> list[str]:
+    """Architecture flags this backbone ignores, as CLI spellings."""
+    used = set(_ARCH_FLAGS_USED[model])
+    return ["--" + f.replace("_", "-") for f in _ARCH_FLAGS_ALL if f not in used]
 
 
 def _build_model(args: argparse.Namespace, sample_dataset: Any):
+    inert = _inert_arch_flags(args.model)
+    if inert:
+        logger.warning(
+            "%s ignores these flags: %s. Do not read them as settings that "
+            "took effect.",
+            args.model,
+            " ".join(inert),
+        )
+
     unified = UnifiedMultimodalEmbeddingModel(
         processors=sample_dataset.input_processors,
         embedding_dim=args.embedding_dim,
@@ -269,7 +361,9 @@ def run(args: argparse.Namespace) -> Path:
             "Task produced zero samples. Check roots/tables or adjust settings."
         )
 
-    train_ds, val_ds, test_ds = _split_dataset(sample_dataset, seed=args.seed)
+    train_ds, val_ds, test_ds = _split_dataset(
+        sample_dataset, seed=args.seed, allow_leaky_split=args.allow_leaky_split
+    )
 
     model = _build_model(args, sample_dataset)
 
@@ -306,27 +400,14 @@ def run(args: argparse.Namespace) -> Path:
         exp_name=exp_name,
     )
 
-    # BottleneckTransformer is more fragile on full MIMIC-IV with no warmup.
-    # Use safer defaults unless explicitly overridden from CLI.
+    # Optimizer settings come from the CLI only. There used to be a per-model
+    # branch here that gave bottleneck_transformer max_grad_norm=0.5 and Adam
+    # eps=1e-6 while every other backbone got 1.0 and 1e-8, so a six-backbone
+    # table that reads as compute-matched was not. If a model needs different
+    # optimizer settings, the launcher has to say so.
     effective_lr = args.lr
     effective_max_grad_norm = args.max_grad_norm
-    optimizer_params = {}
-
-    if args.model == "bottleneck_transformer":
-        if effective_lr is None:
-            effective_lr = 1e-4
-        if effective_max_grad_norm is None:
-            effective_max_grad_norm = 0.5
-        optimizer_params["eps"] = args.adam_eps if args.adam_eps is not None else 1e-6
-    else:
-        if effective_lr is None:
-            effective_lr = 1e-4
-        if effective_max_grad_norm is None:
-            effective_max_grad_norm = 1.0
-        if args.adam_eps is not None:
-            optimizer_params["eps"] = args.adam_eps
-
-    optimizer_params["lr"] = effective_lr
+    optimizer_params = {"lr": effective_lr, "eps": args.adam_eps}
 
     if args.epochs > 0 and len(train_ds) > 0:
         metrics_history = trainer.train(
@@ -401,16 +482,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lr",
         type=float,
-        default=None,
-        help="Learning rate. Default is 1e-4 for all models.",
+        default=1e-4,
+        help="Learning rate, same for every model.",
     )
     parser.add_argument(
         "--adam-eps",
         type=float,
-        default=None,
+        default=1e-8,
+        help="Adam epsilon, same for every model (torch default).",
+    )
+    parser.add_argument(
+        "--allow-leaky-split",
+        action="store_true",
+        default=False,
         help=(
-            "Adam epsilon. Default is model-specific: 1e-8 for non-BT models, "
-            "1e-6 for bottleneck_transformer."
+            "Permit the by-sample split fallback when the patient split is "
+            "empty. The same patient can then land in train and test. Smoke "
+            "tests only — the metrics are not usable."
         ),
     )
     parser.add_argument("--weight-decay", type=float, default=0.0)
@@ -422,10 +510,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--amp-dtype",
+        "--amp_dtype",
+        dest="amp_dtype",
         type=str,
-        default="bf16",
+        default=None,
         choices=["bf16", "fp16"],
-        help="AMP dtype when --use-amp is set. bf16 is more stable (default).",
+        help=(
+            "AMP dtype. Requires --use-amp; passing this alone is an error "
+            "rather than a silently fp32 run. Defaults to bf16 with --use-amp."
+        ),
     )
     parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
@@ -502,11 +595,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-grad-norm",
         type=float,
-        default=None,
-        help=(
-            "Gradient clipping max norm. Default is model-specific: None for "
-            "non-BT models, 0.5 for bottleneck_transformer."
-        ),
+        default=1.0,
+        help="Gradient clipping max norm, same for every model.",
     )
 
     parser.add_argument(
@@ -539,7 +629,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jamba-mamba-layers", type=int, default=6,
                         help="Number of Mamba (SSM) layers in JambaEHR.")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # The Tranche 1 flag list says --amp_dtype "bf16" and never mentions
+    # --use-amp, so following it literally used to give a silently fp32 run.
+    if args.amp_dtype is not None and not args.use_amp:
+        parser.error(
+            f"--amp-dtype {args.amp_dtype} was passed without --use-amp, so "
+            "mixed precision would be off and the run would be fp32 while the "
+            "config claimed otherwise. Pass --use-amp, or drop --amp-dtype."
+        )
+    if args.amp_dtype is None:
+        args.amp_dtype = "bf16"
+
+    return args
 
 
 if __name__ == "__main__":

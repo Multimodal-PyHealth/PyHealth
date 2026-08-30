@@ -1,5 +1,5 @@
 project_dir = "PyHealth"
-seed = 12
+seed = 2
 conda_env = "pyhealth2"
 ehr_root = "/home/ubuntu/mimiciv-data/ehr"
 note_root = "/home/ubuntu/mimiciv-data"
@@ -20,14 +20,13 @@ amp_dtype = "bf16"
 epochs = 50
 batch_size = 32
 lr = 1e-4
-weight_decay = 1e-5
 patience = 5
 num_workers = 4
 freeze_encoder = True
 dev = False
 use_old_cache = False
 use_wandb = True
-wandb_project = "pyhealth-multimodal-labs-notes"
+wandb_project = f"pyhealth-multimodal-labs-notes-seed-{seed}"
 wandb_run_name = None  # defaults to "{model}_seed{seed}" if unset
 cuda_visible_devices = "0"
 session_name = f"jambaehr_labs_notes_s{seed}_batchsize{batch_size}"
@@ -84,7 +83,6 @@ flags += [
     f"--epochs {epochs}",
     f"--batch-size {batch_size}",
     f"--lr {lr}",
-    f"--weight-decay {weight_decay}",
     f"--patience {patience}",
     f"--num-workers {num_workers}",
 ]

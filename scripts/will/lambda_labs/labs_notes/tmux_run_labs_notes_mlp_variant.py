@@ -8,8 +8,8 @@ logs_dir = "/home/ubuntu/logs"
 output_dir = "/home/ubuntu/output"
 embedding_dim = 128
 hidden_dim = 128
-heads = 4
-num_layers = 2
+mlp_layers = 2
+mlp_activation = "relu"
 dropout = 0.1
 use_amp = True
 amp_dtype = "bf16"
@@ -19,13 +19,14 @@ lr = 1e-4
 patience = 5
 num_workers = 4
 freeze_encoder = True
+max_frozen_text_cache = 1000000
 dev = False
 use_old_cache = False
 use_wandb = True
 wandb_project = f"pyhealth-multimodal-labs-notes-seed-{seed}"
 wandb_run_name = None  # defaults to "{model}_seed{seed}" if unset
 cuda_visible_devices = "0"
-session_name = f"transformer_labs_notes_s{seed}"
+session_name = f"mlp_labs_notes_s{seed}"
 
 # ── Step 0a: Check which CUDA GPU is available ───────────────────────────────
 print(f"""
@@ -54,18 +55,18 @@ tmux new-session -s {session_name}
 print("\n" + "=" * 60 + "\n")
 
 log_dir = logs_dir
-log_tag = f"transformer_labs_notes_s{seed}"
+log_tag = f"mlp_labs_notes_s{seed}"
 
 flags = [
     f"--ehr-root {ehr_root}",
     f"--note-root {note_root}",
     f"--cache-dir {cache_dir}",
     f"--task notes_labs{' --dev' if dev else ''}",
-    "--model transformer",
+    "--model mlp",
     f"--embedding-dim {embedding_dim}",
     f"--hidden-dim {hidden_dim}",
-    f"--heads {heads}",
-    f"--num-layers {num_layers}",
+    f"--mlp-layers {mlp_layers}",
+    f"--mlp-activation {mlp_activation}",
     f"--dropout {dropout}",
 ]
 if use_amp:
@@ -80,6 +81,7 @@ flags += [
 ]
 if freeze_encoder:
     flags.append("--freeze-encoder")
+    flags.append(f"--max-frozen-text-cache {max_frozen_text_cache}")
 if use_wandb:
     flags.append("--wandb")
     flags.append(f"--wandb-project {wandb_project}")

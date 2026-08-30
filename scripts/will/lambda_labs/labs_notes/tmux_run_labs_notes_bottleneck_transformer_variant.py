@@ -7,7 +7,6 @@ cache_dir = "/home/ubuntu/mimiciv-data/pyhealth_cache_labs_notes"
 logs_dir = "/home/ubuntu/logs"
 output_dir = "/home/ubuntu/output"
 embedding_dim = 128
-hidden_dim = 128
 heads = 4
 num_layers = 2
 bottlenecks_n = 4
@@ -66,7 +65,6 @@ flags = [
     f"--task notes_labs{' --dev' if dev else ''}",
     "--model bottleneck_transformer",
     f"--embedding-dim {embedding_dim}",
-    f"--hidden-dim {hidden_dim}",
     f"--heads {heads}",
     f"--num-layers {num_layers}",
     f"--bottlenecks-n {bottlenecks_n}",
