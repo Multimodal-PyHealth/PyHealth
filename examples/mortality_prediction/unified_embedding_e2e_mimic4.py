@@ -160,6 +160,7 @@ def _build_model(args: argparse.Namespace, sample_dataset: Any):
         processors=sample_dataset.input_processors,
         embedding_dim=args.embedding_dim,
         freeze_text_encoder=args.freeze_encoder,
+        max_frozen_text_cache=args.max_frozen_text_cache,
     )
 
     if args.model == "mlp":
@@ -447,6 +448,17 @@ def parse_args() -> argparse.Namespace:
         help=(
             "If set, collect labs/CXR/radiology only this many hours from each "
             "admission. Default: full stay (through discharge)."
+        ),
+    )
+    parser.add_argument(
+        "--max-frozen-text-cache",
+        type=int,
+        default=1_000_000,
+        help=(
+            "Max unique frozen [CLS] vectors on CPU. Default 1e6 (~3 GB "
+            "fp32, ~8 GB with Python overhead). 0 means no cap. The cap is "
+            "a RAM fuse, not what makes the cache fast: speedup needs "
+            "cap >= unique notes. 200k is too small for full MIMIC."
         ),
     )
     parser.add_argument(
