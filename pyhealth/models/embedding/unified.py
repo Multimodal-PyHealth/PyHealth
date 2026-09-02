@@ -745,25 +745,40 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
                     cls_emb[valid] = h
                 if field_name in self.projections:
                     cls_emb = self.projections[field_name](cls_emb)
-                emb = cls_emb.view(b, n, -1)  # (B, N, E')
+                # cls_emb.shape[-1] instead of -1: when b*n == 0 (no note
+                # slots in this batch), the -1 is ambiguous for a 0-element
+                # tensor and torch raises "cannot reshape tensor of 0
+                # elements ... because the unspecified dimension size -1
+                # can be any value and is ambiguous".
+                emb = cls_emb.view(b, n, cls_emb.shape[-1])  # (B, N, E')
 
             elif modality == ModalityType.IMAGE:
                 # encoder = Sequential(PatchEmbedding, _MeanPool) → (B*N, E')
                 b, n, c, h, w = value.shape
                 flat_imgs = value.reshape(b * n, c, h, w)
-                if pad_mask is not None:
+                if b * n == 0:
+                    # No image slots in this batch (e.g. no sample has a CXR
+                    # image). flat_imgs.reshape(0, -1) is ambiguous since -1
+                    # can be any value when the tensor already has 0 elements.
+                    valid = torch.zeros(b * n, dtype=torch.bool, device=value.device)
+                elif pad_mask is not None:
                     valid = pad_mask.reshape(b * n).bool()
                 else:
                     valid = flat_imgs.reshape(b * n, -1).abs().sum(dim=-1) > 0
                 if valid.any():
                     img_valid = encoder(flat_imgs[valid])
-                    img_emb = img_valid.new_zeros(
-                        (b * n, img_valid.shape[-1])
-                    )
+                    emb_dim = img_valid.shape[-1]
+                    img_emb = img_valid.new_zeros((b * n, emb_dim))
                     img_emb[valid] = img_valid
                 else:
-                    img_emb = value.new_zeros((b * n, self._embedding_dim))
-                emb = img_emb.view(b, n, -1)  # (B, N, E')
+                    emb_dim = self._embedding_dim
+                    img_emb = value.new_zeros((b * n, emb_dim))
+                # emb_dim instead of -1: when b*n == 0 (no image slots in
+                # this batch), the -1 is ambiguous for a 0-element tensor
+                # and torch raises "cannot reshape tensor of 0 elements
+                # ... because the unspecified dimension size -1 can be any
+                # value and is ambiguous".
+                emb = img_emb.view(b, n, emb_dim)  # (B, N, E')
 
             else:  # NUMERIC / SIGNAL
                 # Standardise BEFORE the projection. The projection mixes the
