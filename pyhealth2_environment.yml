@@ -161,6 +161,7 @@ dependencies:
   - terminado=0.18.1=pyhc90fa1f_1
   - tinycss2=1.4.0=pyhd8ed1ab_0
   - tk=8.6.15=h54e0aa7_0
+  - tmux
   - tomli=2.4.1=pyhcf101f3_0
   - traitlets=5.15.1=pyhcf101f3_0
   - typing-extensions=4.15.0=h396c80c_0

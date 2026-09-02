@@ -29,7 +29,7 @@ use_wandb = True
 wandb_project = f"pyhealth-multimodal-labs-notes-seed-{seed}"
 wandb_run_name = None  # defaults to "{model}_seed{seed}" if unset
 cuda_visible_devices = "0"
-session_name = f"jambaehr_labs_notes_s{seed}_batchsize{batch_size}"
+session_name = f"jambaehr_labs_notes_s{seed}"
 
 # ── Step 0a: Check which CUDA GPU is available ───────────────────────────────
 print(f"""

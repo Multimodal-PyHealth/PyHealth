@@ -1,5 +1,5 @@
 project_dir = "PyHealth"
-seed = 12
+seed = 2
 conda_env = "pyhealth2"
 ehr_root = "/home/ubuntu/mimiciv-data/ehr"
 note_root = "/home/ubuntu/mimiciv-data"
@@ -24,7 +24,7 @@ freeze_encoder = True
 dev = False
 use_old_cache = False
 use_wandb = True
-wandb_project = "pyhealth-multimodal-labs-notes"
+wandb_project = f"pyhealth-multimodal-labs-notes-seed-{seed}"
 wandb_run_name = None  # defaults to "{model}_seed{seed}" if unset
 cuda_visible_devices = "0"
 session_name = f"bottleneck_transformer_labs_notes_s{seed}"

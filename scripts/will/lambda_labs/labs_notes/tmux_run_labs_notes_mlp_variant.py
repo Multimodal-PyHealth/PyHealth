@@ -19,7 +19,6 @@ lr = 1e-4
 patience = 5
 num_workers = 4
 freeze_encoder = True
-max_frozen_text_cache = 1000000
 dev = False
 use_old_cache = False
 use_wandb = True
@@ -81,7 +80,6 @@ flags += [
 ]
 if freeze_encoder:
     flags.append("--freeze-encoder")
-    flags.append(f"--max-frozen-text-cache {max_frozen_text_cache}")
 if use_wandb:
     flags.append("--wandb")
     flags.append(f"--wandb-project {wandb_project}")
