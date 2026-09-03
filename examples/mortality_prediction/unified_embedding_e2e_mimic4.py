@@ -57,6 +57,7 @@ from pyhealth.datasets import (
     split_by_sample,
 )
 from pyhealth.models import MLP, RNN, Transformer, UnifiedMultimodalEmbeddingModel
+from pyhealth.models.embedding.unified import IMAGE_BACKBONES
 from pyhealth.models.bottleneck_transformer import BottleneckTransformer
 from pyhealth.models.ehrmamba import EHRMamba
 from pyhealth.models.jamba_ehr import JambaEHR
@@ -246,6 +247,9 @@ def _build_model(
     unified = UnifiedMultimodalEmbeddingModel(
         processors=sample_dataset.input_processors,
         embedding_dim=args.embedding_dim,
+        image_backbone=args.image_backbone,
+        image_pretrained=not args.no_image_pretrained,
+        freeze_image_encoder=not args.train_image_encoder,
         freeze_text_encoder=args.freeze_encoder,
         max_frozen_text_cache=args.max_frozen_text_cache,
         text_grad_checkpoint_rows=args.text_grad_checkpoint_rows,
@@ -697,6 +701,32 @@ def parse_args() -> argparse.Namespace:
             "run note rows through BERT in chunks of this size. Bounds "
             "activation memory; the math is unchanged. 0 disables."
         ),
+    )
+    parser.add_argument(
+        "--image-backbone",
+        type=str,
+        default="xrv_chex",
+        choices=list(IMAGE_BACKBONES),
+        help=(
+            "CXR encoder. Default xrv_chex: DenseNet-121 trained on CheXpert "
+            "chest radiographs — domain-matched, single-channel, and disjoint "
+            "from MIMIC-CXR so our evaluation images were never seen in "
+            "pretraining. 'patch' is the control: a randomly-initialised conv "
+            "that cannot represent image content. resnet18/34 are the ImageNet "
+            "baseline MedFuse uses. xrv_mimic_ch/xrv_all overlap our corpus."
+        ),
+    )
+    parser.add_argument(
+        "--no-image-pretrained",
+        action="store_true",
+        default=False,
+        help="Use the chosen backbone's architecture at random init (ablation).",
+    )
+    parser.add_argument(
+        "--train-image-encoder",
+        action="store_true",
+        default=False,
+        help="Unfreeze the image backbone. Default is frozen.",
     )
     parser.add_argument("--rnn-type", type=str, default="GRU")
     parser.add_argument("--rnn-layers", type=int, default=1)

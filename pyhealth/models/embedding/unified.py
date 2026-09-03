@@ -129,6 +129,136 @@ class _MeanPool(nn.Module):
         return x.mean(dim=1)
 
 
+# CXR encoders.
+#
+# "patch" is a single randomly-initialised Conv2d mean-pooled to one vector per
+# image — close to a handful of global intensity statistics. It cannot represent
+# image content, so it is the *control* arm, not a sensible default.
+#
+# resnet18/34/densenet121 load ImageNet weights: generic natural-image features,
+# 3-channel, the field-standard baseline and what MedFuse uses.
+#
+# xrv_* load torchxrayvision DenseNet-121 trained on chest radiographs for
+# pathology detection: domain-matched, single-channel (which is what our images
+# actually are), 224 res matching the files on disk. The suffix picks the
+# pretraining corpus, and that choice matters for what we can claim:
+#   xrv_chex / xrv_nih / xrv_pc   CheXpert / NIH / PadChest — DISJOINT from
+#                                 MIMIC-CXR, so our evaluation images were never
+#                                 seen during pretraining
+#   xrv_mimic_ch / xrv_all        trained on MIMIC-CXR itself — same corpus our
+#                                 cohort is drawn from. Not label leakage (they
+#                                 predict findings, not mortality) but an
+#                                 avoidable objection; disclose if reported.
+_XRV_WEIGHTS = {
+    "xrv_chex": "densenet121-res224-chex",
+    "xrv_nih": "densenet121-res224-nih",
+    "xrv_pc": "densenet121-res224-pc",
+    "xrv_mimic_ch": "densenet121-res224-mimic_ch",
+    "xrv_all": "densenet121-res224-all",
+}
+
+IMAGE_BACKBONES = (
+    "patch",
+    "resnet18",
+    "resnet34",
+    "densenet121",
+) + tuple(_XRV_WEIGHTS)
+
+
+class _PretrainedImageEncoder(nn.Module):
+    """Frozen pretrained CXR backbone: (B, C, H, W) in [0, 1] -> (B, embedding_dim).
+
+    The processor hands every backbone the same [0, 1] tensor, so each set of
+    weights applies the normalisation it was trained with *here* rather than in
+    the processor. That keeps the task schema backbone-agnostic and means the
+    cached tensors stay valid when the backbone changes — the alternative bakes
+    one backbone's mean/std into the task cache.
+
+    The ``xrv_*`` backbones are single-channel and expect [-1024, 1024] rather
+    than ImageNet statistics; see ``_XRV_WEIGHTS`` for which pretraining corpus
+    each one uses and whether it overlaps MIMIC-CXR.
+    """
+
+    IMAGENET_MEAN = (0.485, 0.456, 0.406)
+    IMAGENET_STD = (0.229, 0.224, 0.225)
+
+    def __init__(
+        self,
+        backbone: str,
+        embedding_dim: int,
+        pretrained: bool = True,
+        freeze: bool = True,
+    ) -> None:
+        super().__init__()
+        self.backbone_name = backbone
+        self.is_xrv = backbone in _XRV_WEIGHTS
+
+        if self.is_xrv:
+            import torchxrayvision as xrv
+
+            net = xrv.models.DenseNet(weights=_XRV_WEIGHTS[backbone])
+            self.net = net
+            feat_dim = 1024
+        else:
+            import torchvision.models as tvm
+
+            weights = tvm.get_model_weights(backbone).DEFAULT if pretrained else None
+            net = getattr(tvm, backbone)(weights=weights)
+            if hasattr(net, "fc"):  # resnet family
+                feat_dim = net.fc.in_features
+                net.fc = nn.Identity()
+            else:  # densenet family
+                feat_dim = net.classifier.in_features
+                net.classifier = nn.Identity()
+            self.net = net
+            self.register_buffer(
+                "_mean", torch.tensor(self.IMAGENET_MEAN).view(1, 3, 1, 1)
+            )
+            self.register_buffer(
+                "_std", torch.tensor(self.IMAGENET_STD).view(1, 3, 1, 1)
+            )
+
+        self.frozen = freeze
+        if freeze:
+            for p in self.net.parameters():
+                p.requires_grad = False
+            self.net.eval()
+
+        self.project = nn.Linear(feat_dim, embedding_dim)
+
+    def train(self, mode: bool = True) -> "_PretrainedImageEncoder":
+        """Keep a frozen backbone in eval mode so BN statistics do not drift."""
+        super().train(mode)
+        if self.frozen:
+            self.net.eval()
+        return self
+
+    def _features(self, x: torch.Tensor) -> torch.Tensor:
+        if self.is_xrv:
+            # torchxrayvision wants one channel scaled to [-1024, 1024].
+            if x.shape[1] > 1:
+                x = x[:, :1]
+            x = (x * 2.0 - 1.0) * 1024.0
+            f = self.net.features(x)
+            f = torch.nn.functional.relu(f, inplace=True)
+            return torch.flatten(
+                torch.nn.functional.adaptive_avg_pool2d(f, (1, 1)), 1
+            )
+        if x.shape[1] == 1:
+            x = x.expand(-1, 3, -1, -1)
+        x = (x - self._mean) / self._std
+        return self.net(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.frozen:
+            with torch.no_grad():
+                f = self._features(x)
+            f = f.detach()
+        else:
+            f = self._features(x)
+        return self.project(f.to(self.project.weight.dtype))
+
+
 # ── Main model ───────────────────────────────────────────────────────────────
 
 
@@ -237,6 +367,9 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         image_channels: int = 3,
         patch_size: int = 16,
         image_pool: str = "mean",
+        image_backbone: str = "patch",
+        image_pretrained: bool = True,
+        freeze_image_encoder: bool = True,
         field_embeddings: Optional[dict[str, Any]] = None,
         freeze_text_encoder: bool = False,
         normalize_content: bool = True,
@@ -250,6 +383,14 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
             raise NotImplementedError(
                 f"Only image_pool='mean' is implemented, got {image_pool!r}."
             )
+        if image_backbone not in IMAGE_BACKBONES:
+            raise ValueError(
+                f"image_backbone must be one of {IMAGE_BACKBONES}, got "
+                f"{image_backbone!r}."
+            )
+        self.image_backbone = image_backbone
+        self.image_pretrained = image_pretrained
+        self.freeze_image_encoder = freeze_image_encoder
         self._embedding_dim = embedding_dim
         self._freeze_text_encoder = freeze_text_encoder
         self._frozen_text_fields: set[str] = set()
@@ -308,6 +449,9 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
                     image_channels,
                     patch_size,
                     image_pool,
+                    image_backbone,
+                    image_pretrained,
+                    freeze_image_encoder,
                 )
 
             elif m in (ModalityType.NUMERIC, ModalityType.SIGNAL):
@@ -430,10 +574,23 @@ class UnifiedMultimodalEmbeddingModel(nn.Module, BaseEmbeddingModel):
         image_channels: int,
         patch_size: int,
         image_pool: str,
+        image_backbone: str = "patch",
+        image_pretrained: bool = True,
+        freeze_image_encoder: bool = True,
     ) -> nn.Module:
         """Build IMAGE encoder: backbone + pool, optionally from VisionEmbeddingModel."""
         pool_layers: dict[str, nn.Module] = {"mean": _MeanPool()}
         pool_layer = pool_layers[image_pool]
+
+        # A pretrained backbone already reduces an image to one vector, so it
+        # replaces both the patch projection and the mean pool.
+        if image_backbone != "patch":
+            return _PretrainedImageEncoder(
+                image_backbone,
+                embedding_dim,
+                pretrained=image_pretrained,
+                freeze=freeze_image_encoder,
+            )
 
         if (
             pre_built is not None

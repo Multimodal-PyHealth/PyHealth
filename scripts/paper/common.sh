@@ -18,12 +18,32 @@ EHR_ROOT="${EHR_ROOT:-/shared/rsaas/physionet.org/files/mimiciv/2.2}"
 NOTE_ROOT="${NOTE_ROOT:-/shared/rsaas/physionet.org/files/mimic-note}"
 CXR_ROOT="${CXR_ROOT:-}"
 FROZEN_TEXT_CACHE="${FROZEN_TEXT_CACHE:-1000000}"
+# CXR encoder. "patch" is a randomly-initialised Conv2d patch projection trained
+# from scratch; resnet18/resnet34/densenet121 load ImageNet weights and
+# xrv_densenet121 loads DenseNet-121 pretrained on MIMIC-CXR itself. Frozen by
+# default, so this changes what the image branch can represent, not its cost.
+IMAGE_BACKBONE="${IMAGE_BACKBONE:-patch}"
 GPU="${GPU-0}"
 
 # Dataset/task build parallelism. Infrastructure, not protocol: it changes how
 # long the first run takes to materialise the task cache, not what the cache
 # contains. Raise it when building a cold cache (the CXR one is slow).
 NUM_WORKERS="${NUM_WORKERS:-1}"
+
+# CPU threads per cell. These cells are dataloader-bound, not GPU-bound, and
+# torch defaults to 64 intra-op + 128 inter-op threads with nothing pinning
+# them. One cell alone on a quiet box is fine; four cells at once put ~800
+# threads on 128 cores, and measured epoch time went from 191 s to 8600 s with
+# the GPUs sitting at 0-1% utilisation. Pin it, and size it so that
+# THREADS x (cells you launch) stays under the core count you actually have.
+THREADS="${THREADS:-8}"
+export OMP_NUM_THREADS="$THREADS"
+export MKL_NUM_THREADS="$THREADS"
+export OPENBLAS_NUM_THREADS="$THREADS"
+export NUMEXPR_NUM_THREADS="$THREADS"
+# torch's intra-op pool follows OMP_NUM_THREADS. Its inter-op pool does not and
+# has no env var; it still defaults to the core count, so expect roughly
+# THREADS + nproc threads per process rather than exactly THREADS.
 
 RUNNER=examples/mortality_prediction/unified_embedding_e2e_mimic4.py
 
