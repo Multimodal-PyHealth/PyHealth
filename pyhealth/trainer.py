@@ -90,6 +90,38 @@ def _vram_stats(device: str) -> Dict[str, float]:
     return {"vram_allocated_mb": allocated, "vram_peak_mb": peak}
 
 
+def _cpu_seconds() -> Optional[float]:
+    """Cumulative CPU seconds for this process and its dataloader workers.
+
+    Self-only time badly understates a run whose cost is data loading, since
+    workers are separate processes. psutil is already available via wandb; the
+    resource fallback only counts children that have been reaped, so it reads
+    low while persistent workers are still alive.
+    """
+    try:
+        import psutil
+
+        proc = psutil.Process()
+        times = proc.cpu_times()
+        total = times.user + times.system
+        for child in proc.children(recursive=True):
+            try:
+                ctimes = child.cpu_times()
+                total += ctimes.user + ctimes.system
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return total
+    except Exception:
+        try:
+            import resource
+
+            me = resource.getrusage(resource.RUSAGE_SELF)
+            kids = resource.getrusage(resource.RUSAGE_CHILDREN)
+            return me.ru_utime + me.ru_stime + kids.ru_utime + kids.ru_stime
+        except Exception:
+            return None
+
+
 def get_metrics_fn(mode: str) -> Callable:
     if mode == "binary":
         return binary_metrics_fn
@@ -270,6 +302,7 @@ class Trainer:
             if torch.cuda.is_available() and str(self.device).startswith("cuda"):
                 torch.cuda.reset_peak_memory_stats(self.device)
             epoch_start = time.perf_counter()
+            cpu_start = _cpu_seconds()
             # batch training loop
             logger.info("")
             for step_idx in trange(
@@ -336,6 +369,16 @@ class Trainer:
 
             epoch_time = time.perf_counter() - epoch_start
             vram = _vram_stats(self.device)
+            cpu = {}
+            cpu_end = _cpu_seconds()
+            if cpu_start is not None and cpu_end is not None:
+                cpu_s = max(cpu_end - cpu_start, 0.0)
+                cpu = {
+                    "cpu_seconds": round(cpu_s, 2),
+                    # >100% means several cores busy, which is the normal case
+                    # with dataloader workers.
+                    "cpu_util_pct": round(100.0 * cpu_s / max(epoch_time, 1e-9), 1),
+                }
 
             epochs_done = epoch + 1
             epochs_left = epochs - epochs_done
@@ -372,6 +415,7 @@ class Trainer:
                 "epoch_time_s": round(epoch_time, 3),
                 "skipped_steps": epoch_skipped_steps,
                 **{f"train_{k}": v for k, v in vram.items()},
+                **{f"train_{k}": v for k, v in cpu.items()},
             }
 
             # validation

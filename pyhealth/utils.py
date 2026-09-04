@@ -23,8 +23,11 @@ def set_seed(seed):
 
 
 def create_directory(directory):
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+    # exist_ok, not a prior exists() check: two processes importing pyhealth
+    # for the first time both pass the check and one loses the makedirs race
+    # with FileExistsError. Seen on a shared cluster home, where two concurrent
+    # jobs both tried to create ~/.cache/pyhealth/medcode/.
+    os.makedirs(directory, exist_ok=True)
 
 
 def load_pickle(filename):

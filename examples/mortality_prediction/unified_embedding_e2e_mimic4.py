@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import warnings
 from pathlib import Path
@@ -82,6 +83,8 @@ class WandbLogger:
         run_name: str,
         tags: list[str],
         config: Dict[str, Any],
+        group: Optional[str] = None,
+        job_type: Optional[str] = None,
     ) -> None:
         self.enabled = enabled
         self._run = None
@@ -94,6 +97,8 @@ class WandbLogger:
                 name=run_name,
                 tags=tags,
                 config=config,
+                group=group,
+                job_type=job_type,
             )
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None) -> None:
@@ -391,7 +396,15 @@ def run(args: argparse.Namespace) -> Path:
         else None
     )
 
-    exp_name = f"{args.task}_{args.model}_seed{args.seed}"
+    # The window belongs in the name: an observation-window arm is a different
+    # experiment from the full-stay run at the same task/model/seed, and without
+    # the suffix the two share an output directory and a W&B run name.
+    window_suffix = (
+        f"_w{int(args.observation_window_hours)}"
+        if args.observation_window_hours
+        else ""
+    )
+    exp_name = f"{args.task}_{args.model}_seed{args.seed}{window_suffix}"
     output_dir = Path(args.output_dir)
 
     wandb_logger = WandbLogger(
@@ -401,6 +414,10 @@ def run(args: argparse.Namespace) -> Path:
         run_name=args.wandb_run_name or exp_name,
         tags=args.wandb_tags.split(",") if args.wandb_tags else [args.task, args.model],
         config=vars(args),
+        # Group by arm and split by backbone so a many-cell sweep is navigable
+        # instead of one flat list of runs.
+        group=f"{args.task}{window_suffix}",
+        job_type=args.model,
     )
 
     trainer = Trainer(
@@ -438,9 +455,15 @@ def run(args: argparse.Namespace) -> Path:
         for epoch_record in metrics_history:
             wandb_logger.log(epoch_record, step=epoch_record["epoch"])
 
-    if wandb_logger.enabled and test_loader is not None:
+    # Test evaluation must not depend on the logger. This was gated on
+    # wandb_logger.enabled, so a run without --wandb never computed test
+    # metrics at all -- they were not merely unlogged, they were never
+    # calculated.
+    test_scores = None
+    if test_loader is not None:
         test_scores = trainer.evaluate(test_loader)
-        wandb_logger.log({f"test_{k}": v for k, v in test_scores.items()})
+        if wandb_logger.enabled:
+            wandb_logger.log({f"test_{k}": v for k, v in test_scores.items()})
 
     if test_loader is not None:
         inference_loader, eval_split = test_loader, "test"
@@ -468,6 +491,14 @@ def run(args: argparse.Namespace) -> Path:
             "n_test": len(test_ds),
         },
     )
+
+    # metrics_history.json carries validation only, so without this the test
+    # numbers that go in the paper live nowhere on disk -- only in stdout and
+    # W&B, and are recoverable afterwards only by re-scoring predictions.
+    if test_scores is not None:
+        test_path = output_dir / exp_name / "test_metrics.json"
+        with open(test_path, "w") as handle:
+            json.dump({"eval_split": eval_split, **test_scores}, handle, indent=2)
 
     output_csv = output_dir / exp_name / f"predictions_{args.model}.csv"
     _write_predictions(output_csv, patient_ids, y_true, y_prob)
