@@ -83,6 +83,12 @@ class BaseMultimodalMIMIC4Task(BaseTask):
         window_hours: Optional[float] = None,
     ):
         self.window_hours = window_hours
+        # Part of vars(task), which is what the task-cache uuid5 key is built
+        # from. Without it, a cache built before an emitted-data change is
+        # silently reused. Bump whenever the emitted data changes.
+        # 2: event times are hours from the first stay in the sample, not
+        #    reset per admission.
+        self.emitted_data_version = 2
 
     @staticmethod
     def _clean_text(text: Optional[str]) -> Optional[str]:

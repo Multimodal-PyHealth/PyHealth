@@ -65,8 +65,9 @@ from pyhealth.tasks.multimodal_mimic4 import (
     NotesLabsCXRMIMIC4,
     NotesLabsMIMIC4,
 )
+from pyhealth.processors import fit_lab_standardizer
 from pyhealth.trainer import Trainer
-from pyhealth.utils import set_seed
+from pyhealth.utils import set_seed, write_run_config
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,11 @@ def _inert_arch_flags(model: str) -> list[str]:
     return ["--" + f.replace("_", "-") for f in _ARCH_FLAGS_ALL if f not in used]
 
 
-def _build_model(args: argparse.Namespace, sample_dataset: Any):
+def _build_model(
+    args: argparse.Namespace,
+    sample_dataset: Any,
+    numeric_standardizers: Optional[dict[str, Any]] = None,
+):
     inert = _inert_arch_flags(args.model)
     if inert:
         logger.warning(
@@ -252,6 +257,7 @@ def _build_model(args: argparse.Namespace, sample_dataset: Any):
         processors=sample_dataset.input_processors,
         embedding_dim=args.embedding_dim,
         freeze_text_encoder=args.freeze_encoder,
+        numeric_standardizers=numeric_standardizers,
         max_frozen_text_cache=args.max_frozen_text_cache,
         text_grad_checkpoint_rows=args.text_grad_checkpoint_rows,
     )
@@ -365,7 +371,13 @@ def run(args: argparse.Namespace) -> Path:
         sample_dataset, seed=args.seed, allow_leaky_split=args.allow_leaky_split
     )
 
-    model = _build_model(args, sample_dataset)
+    # Lab z-scores, fit on the training split only. Missing values stay
+    # missing; --no-lab-standardization runs raw labs as an ablation.
+    numeric_standardizers: dict[str, Any] = {}
+    if "labs" in sample_dataset.input_processors and not args.no_lab_standardization:
+        numeric_standardizers["labs"] = fit_lab_standardizer(train_ds)
+
+    model = _build_model(args, sample_dataset, numeric_standardizers)
 
     train_loader = get_dataloader(train_ds, batch_size=args.batch_size, shuffle=True)
     val_loader = (
@@ -379,7 +391,7 @@ def run(args: argparse.Namespace) -> Path:
         else None
     )
 
-    exp_name = f"{args.model}_seed{args.seed}"
+    exp_name = f"{args.task}_{args.model}_seed{args.seed}"
     output_dir = Path(args.output_dir)
 
     wandb_logger = WandbLogger(
@@ -430,9 +442,31 @@ def run(args: argparse.Namespace) -> Path:
         test_scores = trainer.evaluate(test_loader)
         wandb_logger.log({f"test_{k}": v for k, v in test_scores.items()})
 
-    inference_loader = test_loader or val_loader or train_loader
+    if test_loader is not None:
+        inference_loader, eval_split = test_loader, "test"
+    elif val_loader is not None:
+        inference_loader, eval_split = val_loader, "val"
+        warnings.warn("No test split; predictions come from VAL.", RuntimeWarning)
+    else:
+        inference_loader, eval_split = train_loader, "train"
+        warnings.warn(
+            "No test or val split; predictions come from TRAIN and are held-in.",
+            RuntimeWarning,
+        )
     y_true, y_prob, _, patient_ids = trainer.inference(
         inference_loader, return_patient_ids=True
+    )
+
+    write_run_config(
+        str(output_dir / exp_name),
+        {
+            **vars(args),
+            "eval_split": eval_split,
+            "lab_standardization": bool(numeric_standardizers),
+            "n_train": len(train_ds),
+            "n_val": len(val_ds),
+            "n_test": len(test_ds),
+        },
     )
 
     output_csv = output_dir / exp_name / f"predictions_{args.model}.csv"
@@ -500,6 +534,12 @@ def parse_args() -> argparse.Namespace:
             "empty. The same patient can then land in train and test. Smoke "
             "tests only — the metrics are not usable."
         ),
+    )
+    parser.add_argument(
+        "--no-lab-standardization",
+        action="store_true",
+        default=False,
+        help="Disable train-split lab z-scoring (raw-lab ablation).",
     )
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--device", type=str, default=None)
