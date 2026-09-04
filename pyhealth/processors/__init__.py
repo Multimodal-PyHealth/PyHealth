@@ -82,4 +82,11 @@ __all__ = [
     "TupleTimeTextProcessor",
     "CehrProcessor",
     "ConceptVocab",
+    "LabStandardizer",
+    "fit_lab_standardizer",
+    "",
 ]
+from .lab_standardizer import (
+    LabStandardizer,
+    fit_lab_standardizer,
+)
