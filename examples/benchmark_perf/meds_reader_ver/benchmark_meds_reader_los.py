@@ -479,6 +479,7 @@ class RunResult:
     task_process_s: float  # Time to run the ML task
     total_s: float  # Total time (conversion + task)
     peak_rss_bytes: int
+    peak_pss_bytes: int
     num_samples: int
     conversion_cached: bool  # True if conversion was skipped
 
@@ -510,6 +511,7 @@ class PeakMemoryTracker:
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._peak = 0
+        self._peak_pss = 0
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -518,13 +520,40 @@ class PeakMemoryTracker:
     def reset(self) -> None:
         with self._lock:
             self._peak = 0
+        self._peak_pss = 0
 
     def stop(self) -> None:
         self._stop.set()
 
+    def peak_pss_bytes(self) -> int:
+        with self._lock:
+            return self._peak_pss
+
     def peak_bytes(self) -> int:
         with self._lock:
             return self._peak
+
+    def _total_pss_bytes(self) -> int:
+        """Proportional set size across the process tree.
+
+        Summing RSS over forked workers counts every shared page once per
+        process; PSS divides it among the mappers, so the total is additive.
+        Falls back to RSS where PSS is unavailable (non-Linux, or no perms).
+        """
+        total = 0
+        try:
+            procs = [self._proc] + self._proc.children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return 0
+        for p in procs:
+            try:
+                total += p.memory_full_info().pss
+            except (psutil.NoSuchProcess, psutil.AccessDenied, AttributeError):
+                try:
+                    total += p.memory_info().rss
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        return total
 
     def _total_rss_bytes(self) -> int:
         total = 0
@@ -542,9 +571,12 @@ class PeakMemoryTracker:
     def _run(self) -> None:
         while not self._stop.is_set():
             rss = self._total_rss_bytes()
+            pss = self._total_pss_bytes()
             with self._lock:
                 if rss > self._peak:
                     self._peak = rss
+                if pss > self._peak_pss:
+                    self._peak_pss = pss
             time.sleep(self._poll_interval_s)
 
 
@@ -759,6 +791,7 @@ def main() -> None:
                     task_process_s=task_process_s,
                     total_s=total_s,
                     peak_rss_bytes=peak_rss_bytes,
+                    peak_pss_bytes=tracker.peak_pss_bytes(),
                     num_samples=num_samples,
                     conversion_cached=conversion.was_cached,
                 )
