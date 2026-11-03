@@ -67,6 +67,11 @@ from .survival_preprocess_support2 import SurvivalPreprocessSupport2
 from .mortality_prediction_stagenet_mimic4 import (
     MortalityPredictionStageNetMIMIC4,
 )
+from .multimodal_mimic4 import (
+    BaseMultimodalMIMIC4Task as BaseMultimodalMIMIC4Task,
+    LabsMIMIC4 as LabsMIMIC4,
+    NotesLabsMIMIC4 as NotesLabsMIMIC4,
+)
 from .generate_ehr import (
     EHRCodeSetGenerationMIMIC3 as EHRCodeSetGenerationMIMIC3,
     EHRCodeSetGenerationMIMIC4 as EHRCodeSetGenerationMIMIC4,
