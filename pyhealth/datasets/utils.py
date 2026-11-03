@@ -381,6 +381,10 @@ def get_dataloader(
     batch_size: int,
     shuffle: bool = False,
     seed: int | None = None,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
+    prefetch_factor: int | None = None,
 ) -> DataLoader:
     """Creates a DataLoader for a given dataset.
 
@@ -400,6 +404,13 @@ def get_dataloader(
             random generator when the loader is created, so
             ``torch.manual_seed(...)`` before this call makes runs
             reproducible. Unshuffled loaders draw nothing.
+        num_workers: Number of worker processes that load and collate batches.
+        pin_memory: Copy CPU tensors into page-locked memory before return.
+        persistent_workers: Keep the loader workers between epochs. This is
+            valid only when ``num_workers`` is more than 0.
+        prefetch_factor: Batches that each worker loads in advance. This is
+            valid only when ``num_workers`` is more than 0. ``None`` keeps
+            the default of PyTorch.
 
     Returns:
         A DataLoader instance for the dataset.
@@ -413,12 +424,32 @@ def get_dataloader(
         ...     get_dataloader(ds, 4, shuffle=True, seed=1))
         True
     """
+    if num_workers < 0:
+        raise ValueError(f"num_workers must be non-negative, got {num_workers}.")
+    if persistent_workers and num_workers == 0:
+        raise ValueError("persistent_workers requires num_workers > 0.")
+    if prefetch_factor is not None and (num_workers == 0 or prefetch_factor <= 0):
+        raise ValueError(
+            "prefetch_factor must be positive and requires num_workers > 0."
+        )
     if shuffle and seed is None:
         seed = int(torch.randint(0, 2**31 - 1, ()).item())
     seed = 0 if seed is None else int(seed)
     # DataLoader draws a base seed from this generator on every pass; a
     # private one keeps that draw off torch's global random state.
     generator = torch.Generator().manual_seed(seed)
+    # DataLoader only accepts persistent_workers/prefetch_factor with
+    # workers; pass them through only then.
+    loader_kwargs: dict[str, Any] = {
+        "batch_size": batch_size,
+        "generator": generator,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
     from .sample_dataset import SampleDataset
 
     if isinstance(dataset, SampleDataset):
@@ -438,19 +469,17 @@ def get_dataloader(
             dataset,
             shuffle_samples=shuffle,
             seed=seed,
-            batch_size=batch_size,
-            generator=generator,
             collate_fn=collate_fn,
+            **loader_kwargs,
         )
     if hasattr(dataset, "set_shuffle"):  # another iterable dataset, e.g. litdata's
         dataset.set_shuffle(shuffle)
         shuffle = False  # DataLoader cannot shuffle an iterable dataset
     dataloader = DataLoader(
         dataset,
-        batch_size=batch_size,
         shuffle=shuffle or None,
-        generator=generator,
         collate_fn=collate_fn_dict_with_padding,
+        **loader_kwargs,
     )
 
     return dataloader
