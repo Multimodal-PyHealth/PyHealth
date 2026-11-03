@@ -3,6 +3,7 @@ import torch
 import logging
 from .base_processor import FeatureProcessor, ModalityType, TemporalFeatureProcessor
 from . import register_processor
+from pyhealth.datasets.collate import _stack_positions
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,10 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
         >>> tag
         'note'
     """
-    
+
+    # Batches of this processor's field also get {field}__pad_mask.
+    emits_pad_mask = True
+
     def __init__(
         self, 
         type_tag: str = "note",
@@ -212,6 +216,24 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
             "mask":  result[1],  # attention_mask (N, L)
             "time":  result[3],  # time tensor (N,)
         }
+
+    def collate(self, values: list[tuple]) -> tuple:
+        """Collates a batch of processed tuples, one tuple position at a time.
+
+        Ragged note counts and note lengths pad to the batch maximum, and the
+        type tag stays a list. ``get_dataloader`` batches the field with this
+        method and adds the ``{field}__pad_mask`` event mask for the batch.
+
+        Examples:
+            >>> import torch
+            >>> proc = TupleTimeTextProcessor()
+            >>> batch = [(torch.ones(2, 3), torch.ones(2), "note"),
+            ...          (torch.ones(1, 3), torch.ones(1), "note")]
+            >>> value, time, tag = proc.collate(batch)
+            >>> value.shape, time.shape, tag
+            (torch.Size([2, 2, 3]), torch.Size([2, 2]), ['note', 'note'])
+        """
+        return _stack_positions(values)
 
     def __repr__(self):
         if self.tokenizer_model:
