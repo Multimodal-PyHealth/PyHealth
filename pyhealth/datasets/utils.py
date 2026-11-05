@@ -9,11 +9,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import litdata
 import torch
 from dateutil.parser import parse as dateutil_parse
-from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 
 from pyhealth import BASE_CACHE_PATH
 from pyhealth.utils import create_directory
+from pyhealth.datasets.collate import _pad_stack
 
 MODULE_CACHE_PATH = os.path.join(BASE_CACHE_PATH, "datasets")
 create_directory(MODULE_CACHE_PATH)
@@ -240,6 +240,9 @@ def _restore_from_cache(sample: Dict[str, Any]) -> Dict[str, Any]:
     return restored
 
 
+PAD_MASK_SUFFIX = "__pad_mask"
+
+
 def collate_fn_dict(batch: List[dict]) -> dict:
     """Collates a batch of data into a dictionary of lists.
 
@@ -286,39 +289,55 @@ def collate_fn_dict_with_padding(
 
         if collators is not None and key in collators:
             collated[key] = collators[key](values)
-        # Check if this is a temporal feature tuple (time, values)
-        elif isinstance(values[0], tuple) and len(values[0]) == 2:
-            # Handle (time, values) tuples from processors
-            time_tensors = [v[0] for v in values]
-            value_tensors = [v[1] for v in values]
-
-            # Collate values
-            if value_tensors[0].dim() == 0:
-                # Scalars
-                collated_values = torch.stack(value_tensors)
-            elif all(v.shape == value_tensors[0].shape for v in value_tensors):
-                # All same shape
-                collated_values = torch.stack(value_tensors)
-            else:
-                # Variable shapes, use pad_sequence
-                collated_values = pad_sequence(
-                    value_tensors, batch_first=True, padding_value=0
-                )
-
-            # Collate times (if present)
-            collated_times = None
-            # Check if ALL samples have time (not just some)
-            if all(t is not None for t in time_tensors):
-                time_tensors_all = [t for t in time_tensors if t is not None]
-                if all(t.shape == time_tensors_all[0].shape for t in time_tensors_all):
-                    collated_times = torch.stack(time_tensors_all)
+        # Check if this is a temporal feature tuple: (time, values) from
+        # numeric/code processors, or (value, mask, ..., time, tag) from
+        # tuple text processors. Positions collate independently so ragged
+        # text batches stack exactly like (time, values) pairs do.
+        elif isinstance(values[0], tuple) and all(
+            isinstance(v, tuple) and len(v) == len(values[0]) for v in values
+        ):
+            arity = len(values[0])
+            stacked = []
+            for pos in range(arity):
+                elems = [v[pos] for v in values]
+                if all(e is None for e in elems):
+                    stacked.append(None)
+                elif all(e is None or isinstance(e, torch.Tensor) for e in elems):
+                    if any(e is None for e in elems):
+                        # Partial time info is dropped, as before
+                        stacked.append(None)
+                    elif elems[0].dim() == 0:
+                        # Scalars
+                        stacked.append(torch.stack(elems))
+                    else:
+                        # Same shape stacks; ragged pads every dimension
+                        stacked.append(_pad_stack(elems))
                 else:
-                    collated_times = pad_sequence(
-                        time_tensors_all, batch_first=True, padding_value=0
-                    )
+                    # Non-tensor positions (e.g. the text type tag) stay lists
+                    stacked.append(elems)
 
-            # Return as tuple (time, values)
-            collated[key] = (collated_times, collated_values)
+            # Return as a tuple in the processor's schema order
+            collated[key] = tuple(stacked)
+            # Event-level validity from the first non-scalar tensor
+            # position: every tensor position shares dim 0 (the event
+            # count). For (time, values) pairs this matches the old
+            # values-based lengths exactly.
+            event_lengths = None
+            for pos in range(arity):
+                elems = [v[pos] for v in values]
+                if (
+                    all(isinstance(e, torch.Tensor) for e in elems)
+                    and elems[0].dim() > 0
+                ):
+                    if not all(e.shape == elems[0].shape for e in elems):
+                        event_lengths = [e.shape[0] for e in elems]
+                    break
+            if event_lengths is not None:
+                lengths = torch.tensor(event_lengths)
+                width = int(lengths.max())
+                collated[f"{key}{PAD_MASK_SUFFIX}"] = (
+                    torch.arange(width)[None, :] < lengths[:, None]
+                )
             # PyG Data objects (graph processor output)
         elif HAS_PYG and isinstance(values[0], PyGData):
             collated[key] = PyGBatch.from_data_list(values)
@@ -335,9 +354,7 @@ def collate_fn_dict_with_padding(
                     # Scalars, treat as stackable
                     collated[key] = torch.stack(values)
                 elif values[0].dim() >= 1:
-                    collated[key] = pad_sequence(
-                        values, batch_first=True, padding_value=0
-                    )
+                    collated[key] = _pad_stack(values)
                 else:
                     raise ValueError(f"Unsupported tensor shape: {values[0].shape}")
         else:
@@ -381,6 +398,10 @@ def get_dataloader(
     batch_size: int,
     shuffle: bool = False,
     seed: int | None = None,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
+    prefetch_factor: int | None = None,
 ) -> DataLoader:
     """Creates a DataLoader for a given dataset.
 
@@ -400,6 +421,13 @@ def get_dataloader(
             random generator when the loader is created, so
             ``torch.manual_seed(...)`` before this call makes runs
             reproducible. Unshuffled loaders draw nothing.
+        num_workers: Number of worker processes that load and collate batches.
+        pin_memory: Copy CPU tensors into page-locked memory before return.
+        persistent_workers: Keep the loader workers between epochs. This is
+            valid only when ``num_workers`` is more than 0.
+        prefetch_factor: Batches that each worker loads in advance. This is
+            valid only when ``num_workers`` is more than 0. ``None`` keeps
+            the default of PyTorch.
 
     Returns:
         A DataLoader instance for the dataset.
@@ -413,12 +441,32 @@ def get_dataloader(
         ...     get_dataloader(ds, 4, shuffle=True, seed=1))
         True
     """
+    if num_workers < 0:
+        raise ValueError(f"num_workers must be non-negative, got {num_workers}.")
+    if persistent_workers and num_workers == 0:
+        raise ValueError("persistent_workers requires num_workers > 0.")
+    if prefetch_factor is not None and (num_workers == 0 or prefetch_factor <= 0):
+        raise ValueError(
+            "prefetch_factor must be positive and requires num_workers > 0."
+        )
     if shuffle and seed is None:
         seed = int(torch.randint(0, 2**31 - 1, ()).item())
     seed = 0 if seed is None else int(seed)
     # DataLoader draws a base seed from this generator on every pass; a
     # private one keeps that draw off torch's global random state.
     generator = torch.Generator().manual_seed(seed)
+    # DataLoader only accepts persistent_workers/prefetch_factor with
+    # workers; pass them through only then.
+    loader_kwargs: dict[str, Any] = {
+        "batch_size": batch_size,
+        "generator": generator,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
     from .sample_dataset import SampleDataset
 
     if isinstance(dataset, SampleDataset):
@@ -438,19 +486,17 @@ def get_dataloader(
             dataset,
             shuffle_samples=shuffle,
             seed=seed,
-            batch_size=batch_size,
-            generator=generator,
             collate_fn=collate_fn,
+            **loader_kwargs,
         )
     if hasattr(dataset, "set_shuffle"):  # another iterable dataset, e.g. litdata's
         dataset.set_shuffle(shuffle)
         shuffle = False  # DataLoader cannot shuffle an iterable dataset
     dataloader = DataLoader(
         dataset,
-        batch_size=batch_size,
         shuffle=shuffle or None,
-        generator=generator,
         collate_fn=collate_fn_dict_with_padding,
+        **loader_kwargs,
     )
 
     return dataloader

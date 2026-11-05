@@ -7,18 +7,33 @@ import warnings
 from typing import Any, Dict, Optional, Tuple, Union, cast
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 from pyhealth.datasets import SampleDataset
 from pyhealth.models import BaseModel
 from pyhealth.models.embedding import EmbeddingModel
+from pyhealth.datasets.utils import PAD_MASK_SUFFIX
+from pyhealth.models.unified_embedding import UnifiedMultimodalEmbeddingModel
 from pyhealth.interpret.api import CheferInterpretable
 
 # VALID_OPERATION_LEVEL = ["visit", "event"]
 
 
 class Attention(nn.Module):
-    """Scaled dot-product attention helper."""
+    """Scaled dot-product attention helper.
+
+    Example:
+        Called inside :class:`MultiHeadedAttention` for each head.
+
+        >>> import torch
+        >>> from pyhealth.models.transformer import Attention
+        >>> attn = Attention()
+        >>> q = k = torch.zeros(1, 1, 2, 4)
+        >>> out, weights = attn(q, k, torch.ones(1, 1, 2, 4))
+        >>> out.shape
+        torch.Size([1, 1, 2, 4])
+    """
 
     def __init__(self):
         super().__init__()
@@ -51,11 +66,13 @@ class Attention(nn.Module):
 
         scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(query.size(-1))
         if mask is not None:
-            # Use -inf so softmax produces exact zeros on padded positions,
-            # avoiding a second masked_fill after softmax (saves one full
-            # [B, H, S, S] boolean allocation and an extra copy).
-            pad_mask = (mask == 0)
-            scores = scores.masked_fill(pad_mask, -1e9)
+            # Fill with the dtype minimum (not -1e9, which is outside the
+            # fp16 range and overflows under AMP) so softmax produces exact
+            # zeros on padded positions, avoiding a second masked_fill
+            # after softmax (saves one full [B, H, S, S] boolean allocation
+            # and an extra copy).
+            pad_mask = mask == 0
+            scores = scores.masked_fill(pad_mask, torch.finfo(scores.dtype).min)
         p_attn = self.softmax(scores)
         if dropout is not None:
             p_attn = dropout(p_attn)
@@ -64,7 +81,15 @@ class Attention(nn.Module):
 
 
 class MultiHeadedAttention(nn.Module):
-    """Multi-head attention wrapper used by the Transformer block."""
+    """Multi-head attention wrapper used by the Transformer block.
+
+    Example:
+        >>> import torch
+        >>> from pyhealth.models.transformer import MultiHeadedAttention
+        >>> mha = MultiHeadedAttention(h=2, d_model=8)
+        >>> mha(torch.zeros(2, 5, 8), torch.zeros(2, 5, 8), torch.zeros(2, 5, 8)).shape
+        torch.Size([2, 5, 8])
+    """
 
     def __init__(self, h: int, d_model: int, dropout: float = 0.1):
         """Initialize the attention module.
@@ -149,19 +174,45 @@ class MultiHeadedAttention(nn.Module):
         ]
 
         # 2) Apply attention on all the projected vectors in batch.
-        if mask is not None:
-            mask = mask.unsqueeze(1)
-        x, attn = self.attention(query, key, value, mask=mask, dropout=self.dropout)
-
-        if register_hook:
-            # Only store attn_map and hook during interpretability passes.
-            # Using .detach() gives an independent copy whose storage
-            # is NOT shared with the live graph, so the graph can be freed
-            # normally after .backward() without leaking GPU memory.
+        # Ordinary training uses fused SDPA. The explicit path stays behind
+        # register_hook=True for interpretability.
+        if not register_hook:
+            query_mask = None
+            attn_mask = None
+            if mask is not None:
+                valid = mask.bool()
+                if mask.dim() == 2:
+                    query_mask = valid[:, None, :, None]
+                    attn_mask = valid[:, None, None, :]
+                else:
+                    query_mask = valid.any(dim=-1)[:, None, :, None]
+                    attn_mask = valid.unsqueeze(1)
+                # A fully-masked query row attends to nothing, which is NaN
+                # or garbage depending on backend and dtype. Let such rows
+                # attend uniformly, then zero their outputs below.
+                attn_mask = attn_mask | ~attn_mask.any(dim=-1, keepdim=True)
+            x = F.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=attn_mask,
+                dropout_p=self.dropout.p if self.training else 0.0,
+            )
+            if query_mask is not None:
+                x = x * query_mask.to(x.dtype)
+            self.attn_map = None
+            self.attn_gradients = None
+        else:
+            if mask is not None:
+                mask = mask.unsqueeze(1)
+            x, attn = self.attention(
+                query, key, value, mask=mask, dropout=self.dropout
+            )
+            # .detach() gives a copy whose storage is NOT shared with the
+            # live graph, so the graph can be freed normally after
+            # .backward() without leaking GPU memory.
             self.attn_map = attn.detach()
             attn.register_hook(self.save_attn_grad)
-        else:
-            self.attn_map = None
         # 3) "Concat" using a view and apply a final linear.
         x = x.transpose(1, 2).contiguous().view(batch_size, -1, self.h * self.d_k)
   
@@ -328,12 +379,21 @@ class Transformer(BaseModel, CheferInterpretable):
     an independent :class:`TransformerLayer`. The resulting [CLS]-style
     embeddings are concatenated and passed to a classification head.
 
+    When ``unified_embedding`` is supplied the model switches to **unified
+    mode**: all temporal fields are jointly embedded and time-sorted by
+    :class:`UnifiedMultimodalEmbeddingModel`, then processed by a *single*
+    :class:`TransformerLayer` rather than one layer per field.  This allows
+    full cross-modal attention over the interleaved event sequence.
+
     Args:
         dataset (SampleDataset): dataset providing processed inputs.
         embedding_dim (int): shared embedding dimension.
         heads (int): number of attention heads per transformer block.
         dropout (float): dropout rate applied inside transformer blocks.
         num_layers (int): number of transformer blocks per feature stream.
+        unified_embedding (UnifiedMultimodalEmbeddingModel, optional): when
+            provided, the model uses a single backbone over the unified
+            multi-modal sequence instead of per-field transformers.
 
     Examples:
         >>> from pyhealth.datasets import create_sample_dataset, get_dataloader
@@ -377,6 +437,7 @@ class Transformer(BaseModel, CheferInterpretable):
         dropout: float = 0.5,
         num_layers: int = 1,
         max_seq_len: int = 1024,
+        unified_embedding: UnifiedMultimodalEmbeddingModel | None = None,
     ):
         super().__init__(dataset=dataset)
         self.embedding_dim = embedding_dim
@@ -385,25 +446,35 @@ class Transformer(BaseModel, CheferInterpretable):
         self.num_layers = num_layers
         self.max_seq_len = max_seq_len
         self._attention_hooks_enabled = False
+        self._use_unified = unified_embedding is not None
 
         assert (
             len(self.label_keys) == 1
         ), "Only one label key is supported if Transformer is initialized"
         self.label_key = self.label_keys[0]
 
-        self.embedding_model = EmbeddingModel(dataset, embedding_dim)
+        output_size = self.get_output_size()
 
-        self.transformer: nn.ModuleDict = nn.ModuleDict()
-        for feature_key in self.feature_keys:
-            self.transformer[feature_key] = TransformerLayer(
+        if self._use_unified:
+            self.embedding_model = unified_embedding
+            self._unified_backbone = TransformerLayer(
                 feature_size=embedding_dim,
                 heads=heads,
                 dropout=dropout,
                 num_layers=num_layers,
             )
-
-        output_size = self.get_output_size()
-        self.fc = nn.Linear(len(self.feature_keys) * embedding_dim, output_size)
+            self.fc = nn.Linear(embedding_dim, output_size)
+        else:
+            self.embedding_model = EmbeddingModel(dataset, embedding_dim)
+            self.transformer: nn.ModuleDict = nn.ModuleDict()
+            for feature_key in self.feature_keys:
+                self.transformer[feature_key] = TransformerLayer(
+                    feature_size=embedding_dim,
+                    heads=heads,
+                    dropout=dropout,
+                    num_layers=num_layers,
+                )
+            self.fc = nn.Linear(len(self.feature_keys) * embedding_dim, output_size)
 
     def _pool_embedding(self, x: torch.Tensor) -> torch.Tensor:
         """Pool nested embeddings to ``[batch, seq_len, hidden]`` format.
@@ -441,6 +512,62 @@ class Transformer(BaseModel, CheferInterpretable):
         if invalid_rows.any():
             mask[invalid_rows, 0] = True
         return mask.bool()
+
+    def _build_unified_inputs(
+        self, kwargs: dict[str, Any]
+    ) -> dict[str, dict[str, torch.Tensor]]:
+        """Build inputs expected by UnifiedMultimodalEmbeddingModel."""
+        inputs: dict[str, dict[str, torch.Tensor]] = {}
+        for field_name in self.feature_keys:
+            feature = kwargs[field_name]
+            if isinstance(feature, torch.Tensor):
+                feature = (feature,)
+
+            schema = self.dataset.input_processors[field_name].schema()
+            field_dict: dict[str, torch.Tensor] = {}
+            if "value" in schema:
+                field_dict["value"] = feature[schema.index("value")].to(self.device)
+            if "time" in schema:
+                field_dict["time"] = feature[schema.index("time")].to(self.device)
+            if "mask" in schema:
+                field_dict["mask"] = feature[schema.index("mask")].to(self.device)
+            pad_mask = kwargs.get(f"{field_name}{PAD_MASK_SUFFIX}")
+            if pad_mask is not None:
+                field_dict["pad_mask"] = pad_mask.to(self.device)
+            inputs[field_name] = field_dict
+
+        return inputs
+
+    def _forward_unified(
+        self,
+        **kwargs: torch.Tensor | tuple[torch.Tensor, ...],
+    ) -> dict[str, torch.Tensor]:
+        """Forward pass in unified-embedding mode."""
+        register_hook = self._attention_hooks_enabled
+        inputs = self._build_unified_inputs(cast(dict[str, Any], kwargs))
+        out = self.embedding_model(inputs)
+        sequence = cast(torch.Tensor, out["sequence"])
+        event_mask = cast(torch.Tensor, out["mask"]).bool()
+
+        _, patient_emb = self._unified_backbone(sequence, event_mask, register_hook)
+
+        logits = self.fc(patient_emb)
+        y_prob = self.prepare_y_prob(logits)
+
+        results: dict[str, torch.Tensor] = {
+            "logit": logits,
+            "y_prob": y_prob,
+        }
+
+        if self.label_key in kwargs:
+            y_true = cast(torch.Tensor, kwargs[self.label_key]).to(self.device)
+            loss = self.get_loss_function()(logits, y_true)
+            results["loss"] = loss
+            results["y_true"] = y_true
+
+        if kwargs.get("embed", False):
+            results["embed"] = patient_emb
+        return results
 
     def forward_from_embedding(
         self,
@@ -541,8 +668,13 @@ class Transformer(BaseModel, CheferInterpretable):
     def forward(
         self,
         **kwargs: torch.Tensor | tuple[torch.Tensor, ...],
-    ) -> Dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         """Forward propagation.
+
+        In **unified mode** (when ``unified_embedding`` was supplied at init)
+        the model jointly embeds all temporal fields and processes them with a
+        single transformer backbone.  Otherwise each field is embedded and
+        encoded independently.
 
         Args:
             **kwargs: keyword arguments for the model.
@@ -561,6 +693,9 @@ class Transformer(BaseModel, CheferInterpretable):
                 logit: the raw logits before activation.
                 embed: (if embed=True in kwargs) the patient embedding.
         """
+        if self._use_unified:
+            return self._forward_unified(**kwargs)
+
         for feature_key in self.feature_keys:
             feature = kwargs[feature_key]
 
