@@ -231,14 +231,69 @@ def _nondefault_inert_flags(args: argparse.Namespace) -> List[str]:
     return set_flags
 
 
+# Modality -> task input fields removed at the model stage. Siblings drop
+# together: labs goes with its observation mask, notes with the single
+# admission-note field that carries both text and note times.
+_DROP_MODALITY_FIELDS = {
+    "labs": ("labs", "labs_mask"),
+    "notes": ("admission_note_times",),
+}
+
+
+def _check_drop_modality(args: argparse.Namespace) -> None:
+    """Refuse a ``--drop-modality`` combination that drops nothing or all.
+
+    Needs only ``task`` and ``drop_modality``, so the experiment driver
+    uses it to refuse bad ablations before running anything. Raises
+    ``ValueError``; the CLI turns it into a parse error.
+
+    Example:
+        >>> _check_drop_modality(
+        ...     argparse.Namespace(task="notes_labs", drop_modality=["notes"]))
+        >>> _check_drop_modality(
+        ...     argparse.Namespace(task="labs", drop_modality=["labs"]))
+        Traceback (most recent call last):
+        ...
+        ValueError: --drop-modality ['labs'] leaves no input modality: ...
+    """
+    drop = args.drop_modality or []
+    if len(set(drop)) != len(drop):
+        raise ValueError(f"--drop-modality contains duplicates: {drop}.")
+    available = {
+        "labs": {"labs", "labs_mask"},
+        "notes_labs": {"admission_note_times", "labs", "labs_mask"},
+    }[args.task]
+    dropped = {f for m in drop for f in _DROP_MODALITY_FIELDS[m]}
+    if dropped - available:
+        raise ValueError(
+            f"--drop-modality {drop} has no fields to remove for --task "
+            f"{args.task}: it only has {sorted(available)}."
+        )
+    if not (set(available) - dropped) & {"labs", "admission_note_times"}:
+        raise ValueError(
+            f"--drop-modality {drop} leaves no input modality: dropping "
+            "everything is refused."
+        )
+
+
 def _build_task(args: argparse.Namespace):
     if args.task == "notes_labs":
-        return NotesLabsMIMIC4(
+        task = NotesLabsMIMIC4(
             window_hours=args.observation_window_hours,
         )
-    if args.task == "labs":
-        return LabsMIMIC4(window_hours=args.observation_window_hours)
-    raise ValueError(f"Unknown task: {args.task}")
+    elif args.task == "labs":
+        task = LabsMIMIC4(window_hours=args.observation_window_hours)
+    else:
+        raise ValueError(f"Unknown task: {args.task}")
+    drop = getattr(args, "drop_modality", None) or []
+    if drop:
+        dropped = {f for m in drop for f in _DROP_MODALITY_FIELDS[m]}
+        task.input_schema = {
+            key: value
+            for key, value in task.input_schema.items()
+            if key not in dropped
+        }
+    return task
 
 
 def _is_mortality_task(task: str) -> bool:
@@ -579,13 +634,15 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
     # suffixes they would collide with the full run.
     dev_suffix = f"_dev{args.dev}" if args.dev else ""
     window_suffix = _window_suffix(args.observation_window_hours)
+    drop = getattr(args, "drop_modality", None) or []
+    drop_suffix = "".join(f"_no{m}" for m in sorted(drop))
     # The flag marks the config, not the outcome: a run that splits
     # cleanly by patient keeps the suffix, so the opt-in stays visible
     # in the directory name.
     leaky_suffix = "_allow_leaky" if args.allow_leaky_split else ""
     exp_name = (
         f"{args.task}_{args.model}_seed{args.seed}"
-        f"{dev_suffix}{window_suffix}{leaky_suffix}"
+        f"{dev_suffix}{window_suffix}{drop_suffix}{leaky_suffix}"
     )
     output_dir = Path(args.output_dir)
 
@@ -868,6 +925,23 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--drop-modality",
+        action="append",
+        choices=["labs", "notes"],
+        default=None,
+        help=(
+            "Drop a modality's input fields at the model stage; repeat for "
+            "both (but dropping everything is refused). labs removes labs "
+            "and labs_mask, notes removes admission_note_times. Same task, "
+            "same samples, same split, same seed: the cohort keeps every "
+            "patient, and a patient with nothing left in the remaining "
+            "modality stays as an empty sequence. Cohort selection, time "
+            "origin, and splits are unchanged -- the task still reads every "
+            "table -- so dropping notes still needs --note-root for --task "
+            "notes_labs, and discharge timing still bounds the windows."
+        ),
+    )
+    parser.add_argument(
         "--freeze-encoder",
         action="store_true",
         default=False,
@@ -980,6 +1054,14 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
             "patients whatever positive value it gets, so any other value "
             "would silently behave as --dev 1000."
         )
+
+    # A modality ablation must keep at least one input modality and may
+    # only drop fields the task has. Checked here so a bad combination
+    # fails before any dataset build.
+    try:
+        _check_drop_modality(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     return args
 

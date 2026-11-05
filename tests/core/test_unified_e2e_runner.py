@@ -90,6 +90,71 @@ class TestUnifiedE2ERunner(unittest.TestCase):
         args = runner.parse_args(["--ehr-root", "/tmp/does-not-exist"])
         runner._require_build_workers(args, sample_dataset=None)
 
+    def test_drop_modality_refusals(self):
+        # Fails without the fix: every one of these used to parse.
+        runner = _runner()
+        base = ["--ehr-root", "/tmp/does-not-exist"]
+        # Duplicates refused.
+        with self.assertRaises(SystemExit):
+            runner.parse_args(
+                base + ["--task", "notes_labs", "--drop-modality", "notes",
+                        "--drop-modality", "notes"]
+            )
+        # Dropping everything refused (both orders, both tasks).
+        with self.assertRaises(SystemExit):
+            runner.parse_args(
+                base + ["--task", "notes_labs", "--drop-modality", "labs",
+                        "--drop-modality", "notes"]
+            )
+        with self.assertRaises(SystemExit):
+            runner.parse_args(
+                base + ["--task", "labs", "--drop-modality", "labs"]
+            )
+        # The labs task has no note fields to drop.
+        with self.assertRaises(SystemExit):
+            runner.parse_args(
+                base + ["--task", "labs", "--drop-modality", "notes"]
+            )
+        # Unknown values rejected by argparse choices.
+        with self.assertRaises(SystemExit):
+            runner.parse_args(
+                base + ["--task", "notes_labs", "--drop-modality", "image"]
+            )
+        # Each single drop parses on notes_labs.
+        for modality in ("labs", "notes"):
+            args = runner.parse_args(
+                base + ["--task", "notes_labs", "--drop-modality", modality]
+            )
+            self.assertEqual(args.drop_modality, [modality])
+        args = runner.parse_args(base + ["--task", "labs"])
+        self.assertIsNone(args.drop_modality)
+
+    def test_drop_modality_filters_task_schema(self):
+        # No dataset needed: only the task's input schema is filtered.
+        runner = _runner()
+        args = runner.parse_args(
+            ["--ehr-root", "/tmp/does-not-exist", "--task", "notes_labs",
+             "--drop-modality", "notes"]
+        )
+        self.assertEqual(
+            sorted(runner._build_task(args).input_schema), ["labs", "labs_mask"]
+        )
+        args = runner.parse_args(
+            ["--ehr-root", "/tmp/does-not-exist", "--task", "notes_labs",
+             "--drop-modality", "labs"]
+        )
+        self.assertEqual(
+            sorted(runner._build_task(args).input_schema),
+            ["admission_note_times"],
+        )
+        args = runner.parse_args(
+            ["--ehr-root", "/tmp/does-not-exist", "--task", "notes_labs"]
+        )
+        self.assertEqual(
+            sorted(runner._build_task(args).input_schema),
+            ["admission_note_times", "labs", "labs_mask"],
+        )
+
     def test_dev_other_values_refused(self):
         # Fails without the fix: --dev 5000 used to parse and then behave
         # as --dev 1000.
