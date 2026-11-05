@@ -90,6 +90,23 @@ class TestUnifiedE2ERunner(unittest.TestCase):
         args = runner.parse_args(["--ehr-root", "/tmp/does-not-exist"])
         runner._require_build_workers(args, sample_dataset=None)
 
+    def test_dev_other_values_refused(self):
+        # Fails without the fix: --dev 5000 used to parse and then behave
+        # as --dev 1000.
+        runner = _runner()
+        for bad in ("5000", "2000", "100", "1"):
+            with self.assertRaises(SystemExit, msg=bad):
+                runner.parse_args(
+                    ["--ehr-root", "/tmp/does-not-exist", "--dev", bad]
+                )
+        args = runner.parse_args(["--ehr-root", "/tmp/does-not-exist"])
+        self.assertEqual(args.dev, 0)
+        for good, want in ((["0"], 0), (["1000"], 1000), ([], 1000)):
+            args = runner.parse_args(
+                ["--ehr-root", "/tmp/does-not-exist", "--dev", *good]
+            )
+            self.assertEqual(args.dev, want)
+
     def test_synthetic_end_to_end(self):
         from pyhealth.datasets import create_sample_dataset
 

@@ -851,9 +851,11 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         const=1000,
         default=0,
         help=(
-            "Dev mode: limit dataset to N patients for fast iteration. "
-            "--dev (no value) defaults to 1000 patients. "
-            "--dev 5000 limits to 5000. Omit for full dataset."
+            "Dev mode: cap the cohort at 1000 patients for fast iteration "
+            "(bare --dev means 1000). Only 0 (off, full dataset) and 1000 "
+            "are accepted: the dataset treats dev as a flag and always "
+            "caps at 1000, so any other value would silently behave as "
+            "1000. Omit for the full dataset."
         ),
     )
     parser.add_argument(
@@ -967,6 +969,17 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         )
     if args.amp_dtype is None:
         args.amp_dtype = "bf16"
+
+    # The dataset treats dev as a flag and hardcodes the 1000-patient cap,
+    # so any other value would silently behave as --dev 1000. Refuse
+    # rather than mislead; the dataset itself is left alone.
+    if args.dev not in (0, 1000):
+        parser.error(
+            f"--dev {args.dev} is not supported. Only 0 (off, full "
+            "dataset) and 1000 are accepted: the dataset caps at 1000 "
+            "patients whatever positive value it gets, so any other value "
+            "would silently behave as --dev 1000."
+        )
 
     return args
 
