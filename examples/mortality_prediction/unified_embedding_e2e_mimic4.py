@@ -110,6 +110,36 @@ class WandbLogger:
             self._run.finish()
 
 
+def _require_build_workers(
+    args: argparse.Namespace, sample_dataset: Any = None
+) -> None:
+    """Refuse ``--num-workers < 1`` when the runner builds the dataset itself.
+
+    A zero-worker distributed cluster never computes (no workers run the
+    tasks), so the build hangs; the local-scheduler path avoids the hang
+    but ``set_task`` then divides the patient list by the worker count.
+    A negative count fails even earlier inside the Dask/torch loader
+    construction, with an error that never names the flag. Either way
+    fewer than one worker cannot build. Zero is still fine for loading
+    a prebuilt ``sample_dataset`` (plain main-process torch loading).
+
+    Example:
+        >>> _require_build_workers(
+        ...     argparse.Namespace(num_workers=1), sample_dataset=None)
+        >>> _require_build_workers(
+        ...     argparse.Namespace(num_workers=0), sample_dataset=object())
+    """
+    if sample_dataset is None and args.num_workers < 1:
+        raise RuntimeError(
+            f"--num-workers {args.num_workers} cannot build the dataset: "
+            "the distributed Dask cluster would start with no workers and "
+            "never compute, and the local-scheduler path "
+            "(--no-dask-distributed) still divides by the worker count in "
+            "set_task. Pass --num-workers 1 or more when the runner builds "
+            "the dataset itself."
+        )
+
+
 def _build_base_dataset(args: argparse.Namespace) -> MIMIC4Dataset:
     ehr_tables = ["labevents"]
     note_tables = None
@@ -492,6 +522,7 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
             args.task,
         )
     set_seed(args.seed)
+    _require_build_workers(args, sample_dataset)
 
     if sample_dataset is None:
         base_dataset = _build_base_dataset(args)
@@ -763,7 +794,18 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         default=1,
         help="Gradient accumulation steps (default 1, no accumulation).",
     )
-    parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help=(
+            "Dask build workers and loader workers. Below 1 is refused "
+            "when the runner builds the dataset itself (a zero-worker "
+            "build hangs or divides by zero; a negative count dies "
+            "inside loader construction); a prebuilt sample dataset may "
+            "still load with 0."
+        ),
+    )
     parser.add_argument(
         "--no-dask-distributed",
         dest="use_dask_distributed",

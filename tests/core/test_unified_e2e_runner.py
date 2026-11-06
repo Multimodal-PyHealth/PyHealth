@@ -70,6 +70,26 @@ class TestUnifiedE2ERunner(unittest.TestCase):
         )
         self.assertFalse(args.cache_frozen_text)
 
+    def test_num_workers_zero_refused_when_building(self):
+        # Tests the guard directly (not via run(), which would hang in the
+        # zero-worker Dask cluster without the fix). Fails without the fix
+        # because _require_build_workers does not exist.
+        runner = _runner()
+        for bad in ("0", "-1"):
+            args = runner.parse_args(
+                ["--ehr-root", "/tmp/does-not-exist",
+                 "--num-workers", bad]
+            )
+            with self.assertRaisesRegex(
+                RuntimeError, f"--num-workers {bad}"
+            ):
+                runner._require_build_workers(args, sample_dataset=None)
+        # A prebuilt dataset may still load with 0 (main-process loading).
+        runner._require_build_workers(args, sample_dataset=object())
+        # nonzero workers always pass, with or without a prebuilt dataset.
+        args = runner.parse_args(["--ehr-root", "/tmp/does-not-exist"])
+        runner._require_build_workers(args, sample_dataset=None)
+
     def test_synthetic_end_to_end(self):
         from pyhealth.datasets import create_sample_dataset
 
