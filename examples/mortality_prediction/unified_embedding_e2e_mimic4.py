@@ -42,7 +42,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -64,8 +66,10 @@ from pyhealth.models.bottleneck_transformer import BottleneckTransformer
 from pyhealth.models.ehrmamba import EHRMamba
 from pyhealth.models.jamba_ehr import JambaEHR
 from pyhealth.tasks.multimodal_mimic4 import LabsMIMIC4, NotesLabsMIMIC4
-from pyhealth.trainer import Trainer
-from pyhealth.utils import set_seed
+from pyhealth.trainer import Trainer, _cpu_seconds
+from pyhealth.utils import set_seed, write_run_config
+
+logger = logging.getLogger(__name__)
 
 
 class WandbLogger:
@@ -77,8 +81,12 @@ class WandbLogger:
         run_name: str,
         tags: list[str],
         config: Dict[str, Any],
+        group: Optional[str] = None,
+        job_type: Optional[str] = None,
     ) -> None:
         self.enabled = enabled
+        self.group = group
+        self.job_type = job_type
         self._run = None
         if self.enabled:
             import wandb
@@ -89,6 +97,8 @@ class WandbLogger:
                 name=run_name,
                 tags=tags,
                 config=config,
+                group=group,
+                job_type=job_type,
             )
 
     def log(self, data: Dict[str, Any], step: Optional[int] = None) -> None:
@@ -121,6 +131,76 @@ def _build_base_dataset(args: argparse.Namespace) -> MIMIC4Dataset:
     )
 
 
+# Architecture flags each backbone actually consumes. Anything else the parser
+# accepts is inert for that model and is warned about at startup, so a launcher
+# can never appear to set something that never reached the model. --dropout is
+# absent for mlp on purpose: pyhealth.models.mlp.MLP has no dropout parameter,
+# and it takes **kwargs, so passing one is swallowed rather than rejected.
+_ARCH_FLAGS_USED: Dict[str, Tuple[str, ...]] = {
+    "mlp": ("embedding_dim", "hidden_dim"),
+    "rnn": (
+        "embedding_dim",
+        "hidden_dim",
+        "dropout",
+        "rnn_type",
+        "rnn_layers",
+        "bidirectional",
+    ),
+    "transformer": ("embedding_dim", "dropout", "heads", "num_layers"),
+    "bottleneck_transformer": (
+        "embedding_dim",
+        "dropout",
+        "heads",
+        "num_layers",
+        "bottlenecks_n",
+        "fusion_startidx",
+    ),
+    "ehrmamba": (
+        "embedding_dim",
+        "dropout",
+        "num_layers",
+        "mamba_state_size",
+        "mamba_conv_kernel",
+    ),
+    "jambaehr": (
+        "embedding_dim",
+        "dropout",
+        "heads",
+        "mamba_state_size",
+        "mamba_conv_kernel",
+        "jamba_transformer_layers",
+        "jamba_mamba_layers",
+    ),
+}
+
+_ARCH_FLAGS_ALL: Tuple[str, ...] = tuple(
+    sorted({flag for flags in _ARCH_FLAGS_USED.values() for flag in flags})
+)
+
+
+def _inert_arch_flags(model: str) -> List[str]:
+    """Architecture flags this backbone ignores, as CLI spellings."""
+    used = set(_ARCH_FLAGS_USED[model])
+    return ["--" + f.replace("_", "-") for f in _ARCH_FLAGS_ALL if f not in used]
+
+
+def _nondefault_inert_flags(args: argparse.Namespace) -> List[str]:
+    """Inert flags the user set to a non-default value, as CLI spellings.
+
+    Compared against a fresh defaults namespace from the same parser, so
+    only an explicitly (or programmatically) changed value warns. The
+    full inert list is still recorded in ``run_config.json``.
+    """
+    defaults = vars(parse_args(["--ehr-root", "probe"]))
+    current = vars(args)
+    set_flags = []
+    for flag in _inert_arch_flags(args.model):
+        dest = flag[2:].replace("-", "_")
+        if current.get(dest) != defaults.get(dest):
+            set_flags.append(flag)
+    return set_flags
+
+
 def _build_task(args: argparse.Namespace):
     if args.task == "notes_labs":
         return NotesLabsMIMIC4(
@@ -131,11 +211,87 @@ def _build_task(args: argparse.Namespace):
     raise ValueError(f"Unknown task: {args.task}")
 
 
-def _split_dataset(dataset: Any, seed: int) -> Tuple[Any, Any, Any]:
+def _split_dataset(
+    dataset: Any, seed: int, allow_leaky_split: bool = False
+) -> Tuple[Any, Any, Any, str]:
+    """Split by patient. Refuse the leaky by-sample fallback unless asked.
+
+    The fallback puts a patient with several admissions in both train and
+    test, which inflates every metric. A run that cannot be split correctly
+    stops rather than quietly producing numbers nobody can use. The mode is
+    returned and recorded alongside the run's results.
+    """
     train_ds, val_ds, test_ds = split_by_patient(dataset, [0.8, 0.1, 0.1], seed=seed)
-    if len(train_ds) == 0 or len(test_ds) == 0:
-        train_ds, val_ds, test_ds = split_by_sample(dataset, [0.8, 0.1, 0.1], seed=seed)
-    return train_ds, val_ds, test_ds
+    if len(train_ds) > 0 and len(test_ds) > 0:
+        return train_ds, val_ds, test_ds, "by_patient"
+
+    if not allow_leaky_split:
+        raise RuntimeError(
+            f"split_by_patient produced an empty split (train={len(train_ds)}, "
+            f"test={len(test_ds)}) on {len(dataset)} samples. The by-sample "
+            "fallback would put the same patient in train and test, so this "
+            "run is refused. Widen the cohort, or pass --allow-leaky-split if "
+            "you are running a smoke test and know the metrics are garbage."
+        )
+
+    warnings.warn(
+        "Falling back to split_by_sample at your request. The same patient "
+        "may now appear in train and test, so these metrics are optimistic "
+        "and not comparable to patient-split runs.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    train_ds, val_ds, test_ds = split_by_sample(dataset, [0.8, 0.1, 0.1], seed=seed)
+    return train_ds, val_ds, test_ds, "by_sample_fallback_leaky"
+
+
+def _window_suffix(observation_window_hours: float) -> str:
+    """Directory/name suffix for the observation-window arm.
+
+    An observation-window arm is a different experiment from the full-stay
+    run at the same task/model/seed; without the suffix the two share an
+    output directory and a W&B run name.
+    """
+    return f"_w{observation_window_hours:g}" if observation_window_hours else ""
+
+
+def _optimizer_settings(args: argparse.Namespace):
+    """Resolve optimizer settings from the CLI only.
+
+    There used to be a per-model branch here that gave
+    bottleneck_transformer max_grad_norm=0.5 and Adam eps=1e-6 while every
+    other backbone got 1.0 and 1e-8, so a six-backbone table that read as
+    compute-matched was not. If a model needs different optimizer settings,
+    the launcher has to say so.
+    """
+    return args.lr, args.max_grad_norm, {"lr": args.lr, "eps": args.adam_eps}
+
+
+def _select_inference_loader(test_loader, val_loader, train_loader):
+    """Name the split predictions come from, warning when it is not test.
+
+    The old ``test_loader or val_loader or train_loader`` chain could report
+    training metrics as test with nothing saying so. The split is now named,
+    warned about, and recorded.
+    """
+    if test_loader is not None:
+        return test_loader, "test"
+    if val_loader is not None:
+        warnings.warn(
+            "No test split available; reporting predictions from the VALIDATION "
+            "split. These are not test metrics.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return val_loader, "val"
+    warnings.warn(
+        "No test or validation split available; reporting predictions from "
+        "the TRAINING split. These metrics are held-in and meaningless as a "
+        "generalisation estimate.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return train_loader, "train"
 
 
 def _build_unified_embedding(
@@ -151,6 +307,15 @@ def _build_unified_embedding(
 
 
 def _build_model(args: argparse.Namespace, sample_dataset: Any, unified):
+    set_inert = _nondefault_inert_flags(args)
+    if set_inert:
+        logger.warning(
+            "%s ignores these flags: %s. Do not read them as settings that "
+            "took effect.",
+            args.model,
+            " ".join(set_inert),
+        )
+
     if args.model == "mlp":
         return MLP(
             dataset=sample_dataset,
@@ -219,6 +384,7 @@ def _write_predictions(
     patient_ids: list[str],
     y_true: np.ndarray,
     y_prob: np.ndarray,
+    eval_split: str,
 ) -> None:
     output_csv.parent.mkdir(parents=True, exist_ok=True)
 
@@ -228,7 +394,13 @@ def _write_predictions(
     with output_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["patient_id", "y_true", "y_prob", "y_pred_threshold_0_5"],
+            fieldnames=[
+                "patient_id",
+                "y_true",
+                "y_prob",
+                "y_pred_threshold_0_5",
+                "eval_split",
+            ],
         )
         writer.writeheader()
         for idx, prob in enumerate(y_prob_flat):
@@ -238,12 +410,13 @@ def _write_predictions(
                     "y_true": int(y_true_flat[idx]),
                     "y_prob": float(prob),
                     "y_pred_threshold_0_5": int(float(prob) >= 0.5),
+                    "eval_split": eval_split,
                 }
             )
 
 
 class _EpochTimedLoader:
-    """Wrap a training loader to record per-epoch wall time.
+    """Wrap a training loader to record per-epoch wall and CPU time.
 
     ``Trainer.train`` returns ``None`` and its epoch loop lives inside the
     Trainer, so the runner cannot time epochs without changing the Trainer.
@@ -256,6 +429,7 @@ class _EpochTimedLoader:
     def __init__(self, loader: Any) -> None:
         self._loader = loader
         self.epoch_boundaries: List[float] = []
+        self.cpu_boundaries: List[Any] = []
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._loader, name)
@@ -265,12 +439,23 @@ class _EpochTimedLoader:
 
     def __iter__(self):
         self.epoch_boundaries.append(time.perf_counter())
+        self.cpu_boundaries.append(_cpu_seconds())
         return iter(self._loader)
 
     def epoch_seconds(self) -> List[float]:
         """Per-epoch durations; the last epoch ends when training returns."""
         ends = self.epoch_boundaries[1:] + [time.perf_counter()]
         return [end - start for start, end in zip(self.epoch_boundaries, ends)]
+
+    def epoch_cpu_seconds(self) -> List[Any]:
+        """Per-epoch CPU seconds; ``None`` where the clock is unavailable."""
+        ends = self.cpu_boundaries[1:] + [_cpu_seconds()]
+        return [
+            None
+            if start is None or end is None
+            else max(end - start, 0.0)
+            for start, end in zip(self.cpu_boundaries, ends)
+        ]
 
 
 def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
@@ -293,7 +478,9 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
                 "Task produced zero samples. Check roots/tables or adjust settings."
             )
 
-    train_ds, val_ds, test_ds = _split_dataset(sample_dataset, seed=args.seed)
+    train_ds, val_ds, test_ds, split_mode = _split_dataset(
+        sample_dataset, seed=args.seed, allow_leaky_split=args.allow_leaky_split
+    )
 
     unified = _build_unified_embedding(args, sample_dataset)
     model = _build_model(args, sample_dataset, unified)
@@ -324,7 +511,27 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
         else None
     )
 
-    exp_name = f"{args.model}_seed{args.seed}"
+    # Name the split predictions come from up front: it is recorded in
+    # run_config.json alongside split_mode and the split sizes.
+    inference_loader, eval_split = _select_inference_loader(
+        test_loader, val_loader, timed_train_loader
+    )
+
+    # The task MUST be in the name. Without it, two arms of the same comparison
+    # at the same seed, for example --task labs and --task notes_labs, resolve
+    # to one directory and the second run overwrites the first. Same for a
+    # --dev smoke check and an observation-window arm: without their
+    # suffixes they would collide with the full run.
+    dev_suffix = f"_dev{args.dev}" if args.dev else ""
+    window_suffix = _window_suffix(args.observation_window_hours)
+    # The flag marks the config, not the outcome: a run that splits
+    # cleanly by patient keeps the suffix, so the opt-in stays visible
+    # in the directory name.
+    leaky_suffix = "_allow_leaky" if args.allow_leaky_split else ""
+    exp_name = (
+        f"{args.task}_{args.model}_seed{args.seed}"
+        f"{dev_suffix}{window_suffix}{leaky_suffix}"
+    )
     output_dir = Path(args.output_dir)
 
     wandb_logger = WandbLogger(
@@ -334,6 +541,10 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
         run_name=args.wandb_run_name or exp_name,
         tags=args.wandb_tags.split(",") if args.wandb_tags else [args.task, args.model],
         config=vars(args),
+        # Group by arm and split by backbone so a many-cell sweep is
+        # navigable instead of one flat list of runs.
+        group=f"{args.task}{window_suffix}",
+        job_type=args.model,
     )
 
     trainer = Trainer(
@@ -345,29 +556,25 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
         exp_name=exp_name,
     )
 
-    # BottleneckTransformer is more fragile on full MIMIC-IV with no warmup.
-    # Use safer defaults unless explicitly overridden from CLI.
-    effective_lr = args.lr
-    effective_max_grad_norm = args.max_grad_norm
-    optimizer_params = {}
+    effective_lr, effective_max_grad_norm, optimizer_params = _optimizer_settings(
+        args
+    )
 
-    if args.model == "bottleneck_transformer":
-        if effective_lr is None:
-            effective_lr = 1e-4
-        if effective_max_grad_norm is None:
-            effective_max_grad_norm = 0.5
-        optimizer_params["eps"] = args.adam_eps if args.adam_eps is not None else 1e-6
-    else:
-        if effective_lr is None:
-            effective_lr = 1e-4
-        if effective_max_grad_norm is None:
-            effective_max_grad_norm = 1.0
-        if args.adam_eps is not None:
-            optimizer_params["eps"] = args.adam_eps
-
-    optimizer_params["lr"] = effective_lr
+    write_run_config(
+        str(output_dir / exp_name),
+        {
+            **vars(args),
+            "split_mode": split_mode,
+            "eval_split": eval_split,
+            "inert_flags": _inert_arch_flags(args.model),
+            "n_train": len(train_ds),
+            "n_val": len(val_ds),
+            "n_test": len(test_ds),
+        },
+    )
 
     epoch_train_seconds: List[float] = []
+    epoch_train_cpu_seconds: List[Any] = []
     if args.epochs > 0 and len(train_ds) > 0:
         trainer.train(
             train_dataloader=timed_train_loader,
@@ -384,6 +591,18 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
             amp_dtype=args.amp_dtype,
         )
         epoch_train_seconds = timed_train_loader.epoch_seconds()
+        epoch_train_cpu_seconds = timed_train_loader.epoch_cpu_seconds()
+
+    train_cpu_seconds = (
+        round(sum(v for v in epoch_train_cpu_seconds if v is not None), 2)
+        if any(v is not None for v in epoch_train_cpu_seconds)
+        else None
+    )
+    train_cpu_util_pct = (
+        round(100.0 * train_cpu_seconds / max(sum(epoch_train_seconds), 1e-9), 1)
+        if train_cpu_seconds is not None and epoch_train_seconds
+        else None
+    )
 
     eval_seconds = 0.0
     test_scores: Dict[str, float] = {}
@@ -393,15 +612,22 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
         eval_seconds = time.perf_counter() - eval_start
         wandb_logger.log({f"test_{k}": v for k, v in test_scores.items()})
 
-    inference_loader = test_loader or val_loader or timed_train_loader
     inference_start = time.perf_counter()
     y_true, y_prob, _, patient_ids = trainer.inference(
         inference_loader, return_patient_ids=True
     )
     inference_seconds = time.perf_counter() - inference_start
 
+    # metrics.json carries validation only, so without this the test numbers
+    # worth reporting live nowhere on disk: only in stdout and W&B, and
+    # recoverable afterwards only by re-scoring predictions by hand.
+    if test_scores:
+        test_path = output_dir / exp_name / "test_metrics.json"
+        with open(test_path, "w") as handle:
+            json.dump({"eval_split": eval_split, **test_scores}, handle, indent=2)
+
     output_csv = output_dir / exp_name / f"predictions_{args.model}.csv"
-    _write_predictions(output_csv, patient_ids, y_true, y_prob)
+    _write_predictions(output_csv, patient_ids, y_true, y_prob, eval_split)
 
     metrics = {
         "config": vars(args),
@@ -411,6 +637,9 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
             "test": len(test_ds) if test_ds is not None else 0,
         },
         "epoch_train_seconds": epoch_train_seconds,
+        "epoch_train_cpu_seconds": epoch_train_cpu_seconds,
+        "train_cpu_seconds": train_cpu_seconds,
+        "train_cpu_util_pct": train_cpu_util_pct,
         "eval_seconds": eval_seconds,
         "inference_seconds": inference_seconds,
         "frozen_text_cache": unified.frozen_text_cache_stats,
@@ -425,6 +654,8 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
     print(
         "epoch_train_seconds="
         f"{[round(t, 3) for t in epoch_train_seconds]} "
+        f"train_cpu_seconds={train_cpu_seconds} "
+        f"train_cpu_util_pct={train_cpu_util_pct} "
         f"eval_seconds={eval_seconds:.3f} "
         f"inference_seconds={inference_seconds:.3f} "
         f"frozen_text_cache={metrics['frozen_text_cache']}"
@@ -476,17 +707,14 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument(
         "--lr",
         type=float,
-        default=None,
-        help="Learning rate. Default is 1e-4 for all models.",
+        default=1e-4,
+        help="Learning rate, same for every model.",
     )
     parser.add_argument(
         "--adam-eps",
         type=float,
-        default=None,
-        help=(
-            "Adam epsilon. Default is model-specific: 1e-8 for non-BT models, "
-            "1e-6 for bottleneck_transformer."
-        ),
+        default=1e-8,
+        help="Adam epsilon, same for every model (torch default).",
     )
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--device", type=str, default=None)
@@ -498,9 +726,12 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument(
         "--amp-dtype",
         type=str,
-        default="bf16",
+        default=None,
         choices=["bf16", "fp16"],
-        help="AMP dtype when --use-amp is set. bf16 is more stable (default).",
+        help=(
+            "AMP dtype. Requires --use-amp; passing this alone is an error "
+            "rather than a silently fp32 run. Defaults to bf16 with --use-amp."
+        ),
     )
     parser.add_argument(
         "--accumulation-steps",
@@ -534,6 +765,16 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="Batches each loader worker prefetches (needs --num-workers > 0).",
+    )
+    parser.add_argument(
+        "--allow-leaky-split",
+        action="store_true",
+        default=False,
+        help=(
+            "Permit the by-sample split fallback when the patient split is "
+            "empty. The same patient can then land in train and test. Smoke "
+            "tests only -- the metrics are not usable."
+        ),
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--patience", type=int, default=None)
@@ -596,11 +837,8 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-grad-norm",
         type=float,
-        default=None,
-        help=(
-            "Gradient clipping max norm. Default is model-specific: None for "
-            "non-BT models, 0.5 for bottleneck_transformer."
-        ),
+        default=1.0,
+        help="Gradient clipping max norm, same for every model.",
     )
 
     parser.add_argument(
@@ -615,7 +853,7 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         "--wandb-run-name",
         type=str,
         default=None,
-        help="Defaults to '{model}_seed{seed}' if unset.",
+        help="Defaults to '{task}_{model}_seed{seed}' if unset.",
     )
     parser.add_argument(
         "--wandb-tags",
@@ -649,7 +887,22 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         help="Number of Mamba (SSM) layers in JambaEHR.",
     )
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    # The spec lists --amp-dtype "bf16" and never mentions --use-amp, so
+    # following it literally used to give a silently fp32 run while the
+    # config claimed bf16.
+    if args.amp_dtype is not None and not args.use_amp:
+        parser.error(
+            f"--amp-dtype {args.amp_dtype} was passed without --use-amp, so "
+            "mixed precision would be off and the run would be fp32 while "
+            "the config claimed otherwise. Pass --use-amp, or drop "
+            "--amp-dtype."
+        )
+    if args.amp_dtype is None:
+        args.amp_dtype = "bf16"
+
+    return args
 
 
 def main(argv: Optional[list] = None) -> Path:
