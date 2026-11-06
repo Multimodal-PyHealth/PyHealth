@@ -41,14 +41,17 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import logging
+import os
 import time
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import torch
 
 from pyhealth.datasets import (
     MIMIC4Dataset,
@@ -555,6 +558,72 @@ class _EpochTimedLoader:
         ]
 
 
+def _reset_cuda_peak_stats(device=None) -> None:
+    """Reset CUDA peak counters so this run owns its VRAM peaks.
+
+    The experiment driver runs several arms in one process, so the peaks
+    must be reset at the start of each run: without this, the second arm
+    would inherit the first arm's maxima.
+
+    Args:
+        device: The run's ``--device`` flag. The peaks are reset on
+            that device; ``None`` (or a non-CUDA flag) keeps the
+            current device.
+    """
+    if torch.cuda.is_available():
+        if device is None or str(device).split(":")[0] == "cuda":
+            cuda_device = device
+        else:
+            cuda_device = None
+        torch.cuda.reset_peak_memory_stats(cuda_device)
+
+
+def _collect_hardware(device: Optional[str]) -> Dict[str, Any]:
+    """Record GPU identity, thread pinning, and peak VRAM for this run.
+
+    Args:
+        device: The runner's ``--device`` flag. ``None`` means the
+            Trainer picks cuda when available, cpu otherwise.
+
+    Returns:
+        A ``hardware`` mapping for ``metrics.json``: ``gpu_model`` (the
+        device name from torch, or ``"cpu"``), ``gpu_count`` (1 on GPU, 0
+        on CPU — the run uses one device, not every visible one),
+        ``thread_pinning`` (the ``OMP_NUM_THREADS`` value, or
+        ``"unset"``), and the CUDA allocated/reserved peaks in MB (null
+        on CPU). Peaks come from ``torch.cuda`` counters, never
+        nvidia-smi.
+
+    Example:
+        >>> hw = _collect_hardware("cpu")
+        >>> (hw["gpu_model"], hw["gpu_count"], hw["vram_allocated_peak_mb"])
+        ('cpu', 0, None)
+    """
+    thread_pinning = os.environ.get("OMP_NUM_THREADS", "unset")
+    use_cuda = torch.cuda.is_available() and (
+        device is None or str(device).split(":")[0] == "cuda"
+    )
+    if not use_cuda:
+        return {
+            "gpu_model": "cpu",
+            "gpu_count": 0,
+            "thread_pinning": thread_pinning,
+            "vram_allocated_peak_mb": None,
+            "vram_reserved_peak_mb": None,
+        }
+    return {
+        "gpu_model": torch.cuda.get_device_name(device),
+        "gpu_count": 1,
+        "thread_pinning": thread_pinning,
+        "vram_allocated_peak_mb": round(
+            torch.cuda.max_memory_allocated(device) / 2**20, 2
+        ),
+        "vram_reserved_peak_mb": round(
+            torch.cuda.max_memory_reserved(device) / 2**20, 2
+        ),
+    }
+
+
 def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
     """Run the end-to-end protocol and write predictions + metrics.
 
@@ -578,6 +647,13 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
         )
     set_seed(args.seed)
     _require_build_workers(args, sample_dataset)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    _reset_cuda_peak_stats(args.device)
+    # Record "no drop" as an empty list (not null) so collected rows can
+    # compare on it; the driver full arm already means it this way.
+    args.drop_modality = args.drop_modality or []
 
     if sample_dataset is None:
         base_dataset = _build_base_dataset(args)
@@ -743,6 +819,7 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
 
     metrics = {
         "config": vars(args),
+        "hardware": _collect_hardware(args.device),
         "split": {
             "train": len(train_ds),
             "val": len(val_ds),

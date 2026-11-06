@@ -10,6 +10,7 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 import torch
 
@@ -240,6 +241,7 @@ DEMO_ROOT = (
 
 _EXPECTED_METRICS_KEYS = (
     "config",
+    "hardware",
     "split",
     "epoch_train_seconds",
     "epoch_train_cpu_seconds",
@@ -448,3 +450,120 @@ class TestUnifiedE2ERunnerDemoData(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCudaPeakDevice(unittest.TestCase):
+    """VRAM peaks are read and reset on the run's device.
+
+    ``torch.cuda`` is mocked here: the device must reach
+    ``max_memory_allocated``, ``max_memory_reserved`` and
+    ``reset_peak_memory_stats``, and the allocator cache (``empty_cache``)
+    must be cleared before the reset so arms sharing one process do not
+    inherit reserved peaks.
+    """
+
+    def test_peaks_read_on_run_device(self):
+        runner = _runner()
+        cuda = runner.torch.cuda
+        with (
+            mock.patch.object(cuda, "is_available", return_value=True),
+            mock.patch.object(
+                cuda, "get_device_name", return_value="cuda:2"),
+            mock.patch.object(
+                cuda, "max_memory_allocated",
+                return_value=2**20) as max_a,
+            mock.patch.object(
+                cuda, "max_memory_reserved",
+                return_value=2 * 2**20) as max_r,
+        ):
+            hw = runner._collect_hardware("cuda:2")
+        max_a.assert_called_once_with("cuda:2")
+        max_r.assert_called_once_with("cuda:2")
+        self.assertEqual(hw["vram_allocated_peak_mb"], 1.0)
+        self.assertEqual(hw["vram_reserved_peak_mb"], 2.0)
+
+    def test_reset_uses_run_device(self):
+        runner = _runner()
+        cuda = runner.torch.cuda
+        with (
+            mock.patch.object(cuda, "is_available", return_value=True),
+            mock.patch.object(
+                cuda, "reset_peak_memory_stats") as reset,
+        ):
+            runner._reset_cuda_peak_stats("cuda:2")
+            reset.assert_called_once_with("cuda:2")
+            reset.reset_mock()
+            runner._reset_cuda_peak_stats(None)
+            reset.assert_called_once_with(None)
+            reset.reset_mock()
+            runner._reset_cuda_peak_stats("cpu")
+            reset.assert_called_once_with(None)
+
+    def test_empty_cache_runs_before_reset(self):
+        from pyhealth.datasets import create_sample_dataset
+
+        runner = _runner()
+        cuda = runner.torch.cuda
+        with (
+            mock.patch.object(cuda, "is_available", return_value=True),
+            mock.patch.object(cuda, "manual_seed"),
+            mock.patch.object(cuda, "manual_seed_all"),
+            mock.patch.object(cuda, "empty_cache") as empty,
+            mock.patch.object(cuda, "reset_peak_memory_stats") as reset,
+            mock.patch.object(
+                cuda, "max_memory_allocated", return_value=2**20),
+            mock.patch.object(
+                cuda, "max_memory_reserved", return_value=2**20),
+            mock.patch.object(
+                cuda, "get_device_name", return_value="cpu"),
+        ):
+            calls = mock.Mock()
+            calls.attach_mock(empty, "empty_cache")
+            calls.attach_mock(reset, "reset_peak_memory_stats")
+            dataset = create_sample_dataset(
+                samples=_samples(),
+                input_schema={"labs": "stagenet_tensor"},
+                output_schema={"label": "binary"},
+                dataset_name="test_vram_order_synthetic",
+            )
+            with TemporaryDirectory() as tmp:
+                args = Namespace(
+                    **{
+                        **vars(
+                            runner.parse_args(
+                                [
+                                    "--ehr-root",
+                                    "/tmp/does-not-exist",
+                                    "--model",
+                                    "mlp",
+                                    # No training: the order check needs
+                                    # only run()'s setup, and no optimizer
+                                    # step means no CUDA health check.
+                                    "--epochs",
+                                    "0",
+                                    "--batch-size",
+                                    "4",
+                                    "--device",
+                                    "cpu",
+                                    "--seed",
+                                    "42",
+                                    "--no-cache-frozen-text",
+                                    "--output-dir",
+                                    tmp,
+                                ]
+                            )
+                        ),
+                        "embedding_dim": 8,
+                        "hidden_dim": 8,
+                    }
+                )
+                output_csv = runner.run(args, sample_dataset=dataset)
+                self.assertTrue(Path(output_csv).is_file())
+            order = [c[0] for c in calls.mock_calls]
+            self.assertIn("empty_cache", order)
+            self.assertIn("reset_peak_memory_stats", order)
+            self.assertLess(
+                order.index("empty_cache"),
+                order.index("reset_peak_memory_stats"),
+            )
+            reset.assert_called_with(None)
