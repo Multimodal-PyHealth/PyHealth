@@ -104,17 +104,17 @@ class TestFrozenTextCache(unittest.TestCase):
         model._encode_text_cls("notes", enc, ids, None)
         self.assertEqual(
             model.frozen_text_cache_stats,
-            {"hits": 0, "misses": 2, "size": 2},
+            {"hits": 0, "misses": 2, "size": 2, "bytes": 64},
         )
         model._encode_text_cls("notes", enc, ids, None)
         self.assertEqual(
             model.frozen_text_cache_stats,
-            {"hits": 2, "misses": 2, "size": 2},
+            {"hits": 2, "misses": 2, "size": 2, "bytes": 64},
         )
         model.reset_frozen_text_cache_stats()
         self.assertEqual(
             model.frozen_text_cache_stats,
-            {"hits": 0, "misses": 0, "size": 2},
+            {"hits": 0, "misses": 0, "size": 2, "bytes": 64},
         )
 
     def test_shuffled_row_order_still_hits(self):

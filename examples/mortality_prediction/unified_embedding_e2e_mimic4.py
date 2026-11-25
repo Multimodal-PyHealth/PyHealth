@@ -44,7 +44,11 @@ import csv
 import gc
 import json
 import logging
+import math
 import os
+import resource
+import sys
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -52,6 +56,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+
+try:
+    import psutil
+except ImportError:  # pragma: no cover - psutil ships with wandb
+    psutil = None
 
 from pyhealth.datasets import (
     MIMIC4Dataset,
@@ -392,6 +401,78 @@ def _select_inference_loader(test_loader, val_loader, train_loader):
         stacklevel=2,
     )
     return train_loader, "train"
+
+
+def _peak_rss_mb() -> float:
+    """Peak resident set size of this process so far, in MiB.
+
+    ``ru_maxrss`` is in bytes on macOS and in KiB on Linux.
+
+    Example:
+        >>> isinstance(_peak_rss_mb(), float)
+        True
+    """
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(peak / 2**20 if sys.platform == "darwin" else peak / 2**10, 1)
+
+
+class _PeakPss:
+    """Sample the process tree's PSS every ``interval_s`` and keep the peak.
+
+    PSS needs ``memory_full_info().pss`` from psutil, which Linux has and
+    macOS does not; there ``peak_mb`` stays ``None``. Children are summed
+    so dataloader workers count, with shared pages split between them.
+    """
+
+    def __init__(self, interval_s: float = 0.2) -> None:
+        self.interval_s = interval_s
+        self.peak_mb = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._sample, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+
+    def _sample(self) -> None:
+        if psutil is None:
+            return
+        try:
+            proc = psutil.Process()
+            while True:
+                total = 0
+                for p in [proc, *proc.children(recursive=True)]:
+                    try:
+                        total += p.memory_full_info().pss
+                    except psutil.NoSuchProcess:
+                        continue
+                mb = round(total / 2**20, 1)
+                if self.peak_mb is None or mb > self.peak_mb:
+                    self.peak_mb = mb
+                if self._stop.wait(self.interval_s):
+                    return
+        except (AttributeError, psutil.Error):
+            return
+
+
+def _positive_rate(samples: Any, label_key: str) -> Optional[float]:
+    """Fraction of positive labels over every sample, to 4 decimals.
+
+    The runner counts the whole cohort before the train/val/test split, so
+    this is the cohort rate, not a split rate.
+
+    Example:
+        >>> _positive_rate([{"y": 1}, {"y": 0}, {"y": 0}, {"y": 0}], "y")
+        0.25
+    """
+    total = len(samples)
+    if total == 0:
+        return None
+    positives = sum(float(samples[i][label_key]) for i in range(total))
+    return round(positives / total, 4)
 
 
 def _build_unified_embedding(
@@ -763,6 +844,9 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
 
     epoch_train_seconds: List[float] = []
     epoch_train_cpu_seconds: List[Any] = []
+    val_pr_auc_best = None
+    pss = _PeakPss()
+    pss.start()
     if args.epochs > 0 and len(train_ds) > 0:
         trainer.train(
             train_dataloader=timed_train_loader,
@@ -780,6 +864,8 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
         )
         epoch_train_seconds = timed_train_loader.epoch_seconds()
         epoch_train_cpu_seconds = timed_train_loader.epoch_cpu_seconds()
+        if math.isfinite(trainer.best_score):
+            val_pr_auc_best = trainer.best_score
 
     train_cpu_seconds = (
         round(sum(v for v in epoch_train_cpu_seconds if v is not None), 2)
@@ -805,6 +891,7 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
         inference_loader, return_patient_ids=True
     )
     inference_seconds = time.perf_counter() - inference_start
+    pss.stop()
 
     # metrics.json carries validation only, so without this the test numbers
     # worth reporting live nowhere on disk: only in stdout and W&B, and
@@ -817,9 +904,19 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
     output_csv = output_dir / exp_name / f"predictions_{args.model}.csv"
     _write_predictions(output_csv, patient_ids, y_true, y_prob, eval_split)
 
+    note_processor = sample_dataset.input_processors.get("admission_note_times")
+    label_key = next(iter(sample_dataset.output_processors))
     metrics = {
         "config": vars(args),
-        "hardware": _collect_hardware(args.device),
+        "hardware": {
+            **_collect_hardware(args.device),
+            "peak_rss_mb": _peak_rss_mb(),
+            "peak_pss_mb": pss.peak_mb,
+        },
+        "note_length": getattr(note_processor, "max_length", None),
+        "text_encoder": getattr(note_processor, "tokenizer_model", None),
+        "positive_rate": _positive_rate(sample_dataset, label_key),
+        "val_pr_auc_best": val_pr_auc_best,
         "split": {
             "train": len(train_ds),
             "val": len(val_ds),

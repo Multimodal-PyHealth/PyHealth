@@ -230,9 +230,14 @@ class TestUnifiedE2ERunner(unittest.TestCase):
             self.assertGreaterEqual(metrics["inference_seconds"], 0.0)
             self.assertEqual(
                 sorted(metrics["frozen_text_cache"]),
-                ["hits", "misses", "size"],
+                ["bytes", "hits", "misses", "size"],
             )
             self.assertTrue(torch.isfinite(torch.tensor(metrics["eval_seconds"])))
+            self.assertGreater(metrics["hardware"]["peak_rss_mb"], 0)
+            self.assertEqual(metrics["positive_rate"], round(
+                sum(s["label"] for s in _samples()) / len(_samples()), 4))
+            if metrics["split"]["val"] > 0:
+                self.assertIsInstance(metrics["val_pr_auc_best"], float)
 
 
 DEMO_ROOT = (
@@ -250,7 +255,10 @@ _EXPECTED_METRICS_KEYS = (
     "eval_seconds",
     "inference_seconds",
     "frozen_text_cache",
-    "test_scores",
+    "test_scores",    "note_length",
+    "text_encoder",
+    "positive_rate",
+    "val_pr_auc_best",
 )
 
 
@@ -333,7 +341,7 @@ def _assert_demo_metrics(testcase, output_csv):
         torch.isfinite(torch.tensor(float(metrics["inference_seconds"]))).item()
     )
     testcase.assertEqual(
-        sorted(metrics["frozen_text_cache"]), ["hits", "misses", "size"]
+        sorted(metrics["frozen_text_cache"]), ["bytes", "hits", "misses", "size"]
     )
     testcase.assertGreater(metrics["split"]["train"], 0)
     for v in metrics["test_scores"].values():
@@ -567,3 +575,22 @@ class TestCudaPeakDevice(unittest.TestCase):
                 order.index("reset_peak_memory_stats"),
             )
             reset.assert_called_with(None)
+
+
+class RunStatsHelperTest(unittest.TestCase):
+    def test_positive_rate_counts_the_whole_cohort(self):
+        runner = _runner()
+        samples = [{"y": 1}, {"y": 0}, {"y": 0}, {"y": 0}, {"y": 0}]
+        self.assertEqual(runner._positive_rate(samples, "y"), 0.2)
+        self.assertIsNone(runner._positive_rate([], "y"))
+
+    def test_peak_rss_is_positive_mib(self):
+        runner = _runner()
+        self.assertGreater(runner._peak_rss_mb(), 0)
+
+    def test_peak_pss_is_none_or_a_positive_sample(self):
+        runner = _runner()
+        sampler = runner._PeakPss(interval_s=0.01)
+        sampler.start()
+        sampler.stop()
+        self.assertTrue(sampler.peak_mb is None or sampler.peak_mb > 0)

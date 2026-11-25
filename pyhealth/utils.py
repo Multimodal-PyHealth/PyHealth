@@ -232,6 +232,16 @@ def save_json(data, filename):
 
 
 def _git_revision():
+    """Return the ``commit`` (HEAD) and ``dirty`` flags of the package's checkout.
+
+    Both are ``None`` when the package is not inside a git checkout (a tarball
+    or an installed copy). ``run_config.json`` then records them as null, and
+    the run-stats collector leaves ``tree_sha`` and ``dirty`` missing.
+
+    Example:
+        >>> sorted(_git_revision())
+        ['commit', 'dirty']
+    """
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     try:
         commit = subprocess.check_output(

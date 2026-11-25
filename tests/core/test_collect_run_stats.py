@@ -214,16 +214,22 @@ class TestCollectRealRun(unittest.TestCase):
             self.assertEqual(row["lr"], 1e-4)
             self.assertEqual(row["split_mode"], "by_patient")
             self.assertEqual(row["eval_split"], "test")
-            # Standard fields a real run still leaves missing.
+            # Standard fields a labs run on CPU still leaves missing: the
+            # note-text fields (no note processor) and the GPU VRAM peaks.
             missing = row["missing_fields"].split(";")
-            expected = ["note_length", "text_encoder", "positive_rate",
-                        "val_pr_auc_best", "vram_allocated_peak_mb",
-                        "vram_reserved_peak_mb", "peak_rss_mb",
-                        "peak_pss_mb", "cache_bytes"]
+            expected = ["note_length", "text_encoder",
+                        "vram_allocated_peak_mb", "vram_reserved_peak_mb"]
+            present = ["positive_rate", "val_pr_auc_best", "peak_rss_mb",
+                       "cache_bytes"]
+            # PSS needs psutil's memory_full_info().pss, which macOS lacks.
+            (expected if sys.platform == "darwin" else present).append(
+                "peak_pss_mb")
             if not (_Path(REPO_ROOT) / ".git").exists():
                 expected += ["tree_sha", "dirty"]
             for field in expected:
                 self.assertIn(field, missing, field)
+            for field in present:
+                self.assertNotIn(field, missing, field)
             for field in ("gpu_model", "gpu_count", "thread_pinning",
                           "drop_modality", "lr", "adam_eps",
                           "max_grad_norm", "dev", "split_mode",
