@@ -110,6 +110,36 @@ class WandbLogger:
             self._run.finish()
 
 
+def _require_build_workers(
+    args: argparse.Namespace, sample_dataset: Any = None
+) -> None:
+    """Refuse ``--num-workers < 1`` when the runner builds the dataset itself.
+
+    A zero-worker distributed cluster never computes (no workers run the
+    tasks), so the build hangs; the local-scheduler path avoids the hang
+    but ``set_task`` then divides the patient list by the worker count.
+    A negative count fails even earlier inside the Dask/torch loader
+    construction, with an error that never names the flag. Either way
+    fewer than one worker cannot build. Zero is still fine for loading
+    a prebuilt ``sample_dataset`` (plain main-process torch loading).
+
+    Example:
+        >>> _require_build_workers(
+        ...     argparse.Namespace(num_workers=1), sample_dataset=None)
+        >>> _require_build_workers(
+        ...     argparse.Namespace(num_workers=0), sample_dataset=object())
+    """
+    if sample_dataset is None and args.num_workers < 1:
+        raise RuntimeError(
+            f"--num-workers {args.num_workers} cannot build the dataset: "
+            "the distributed Dask cluster would start with no workers and "
+            "never compute, and the local-scheduler path "
+            "(--no-dask-distributed) still divides by the worker count in "
+            "set_task. Pass --num-workers 1 or more when the runner builds "
+            "the dataset itself."
+        )
+
+
 def _build_base_dataset(args: argparse.Namespace) -> MIMIC4Dataset:
     ehr_tables = ["labevents"]
     note_tables = None
@@ -201,14 +231,69 @@ def _nondefault_inert_flags(args: argparse.Namespace) -> List[str]:
     return set_flags
 
 
+# Modality -> task input fields removed at the model stage. Siblings drop
+# together: labs goes with its observation mask, notes with the single
+# admission-note field that carries both text and note times.
+_DROP_MODALITY_FIELDS = {
+    "labs": ("labs", "labs_mask"),
+    "notes": ("admission_note_times",),
+}
+
+
+def _check_drop_modality(args: argparse.Namespace) -> None:
+    """Refuse a ``--drop-modality`` combination that drops nothing or all.
+
+    Needs only ``task`` and ``drop_modality``, so the experiment driver
+    uses it to refuse bad ablations before running anything. Raises
+    ``ValueError``; the CLI turns it into a parse error.
+
+    Example:
+        >>> _check_drop_modality(
+        ...     argparse.Namespace(task="notes_labs", drop_modality=["notes"]))
+        >>> _check_drop_modality(
+        ...     argparse.Namespace(task="labs", drop_modality=["labs"]))
+        Traceback (most recent call last):
+        ...
+        ValueError: --drop-modality ['labs'] leaves no input modality: ...
+    """
+    drop = args.drop_modality or []
+    if len(set(drop)) != len(drop):
+        raise ValueError(f"--drop-modality contains duplicates: {drop}.")
+    available = {
+        "labs": {"labs", "labs_mask"},
+        "notes_labs": {"admission_note_times", "labs", "labs_mask"},
+    }[args.task]
+    dropped = {f for m in drop for f in _DROP_MODALITY_FIELDS[m]}
+    if dropped - available:
+        raise ValueError(
+            f"--drop-modality {drop} has no fields to remove for --task "
+            f"{args.task}: it only has {sorted(available)}."
+        )
+    if not (set(available) - dropped) & {"labs", "admission_note_times"}:
+        raise ValueError(
+            f"--drop-modality {drop} leaves no input modality: dropping "
+            "everything is refused."
+        )
+
+
 def _build_task(args: argparse.Namespace):
     if args.task == "notes_labs":
-        return NotesLabsMIMIC4(
+        task = NotesLabsMIMIC4(
             window_hours=args.observation_window_hours,
         )
-    if args.task == "labs":
-        return LabsMIMIC4(window_hours=args.observation_window_hours)
-    raise ValueError(f"Unknown task: {args.task}")
+    elif args.task == "labs":
+        task = LabsMIMIC4(window_hours=args.observation_window_hours)
+    else:
+        raise ValueError(f"Unknown task: {args.task}")
+    drop = getattr(args, "drop_modality", None) or []
+    if drop:
+        dropped = {f for m in drop for f in _DROP_MODALITY_FIELDS[m]}
+        task.input_schema = {
+            key: value
+            for key, value in task.input_schema.items()
+            if key not in dropped
+        }
+    return task
 
 
 def _is_mortality_task(task: str) -> bool:
@@ -492,6 +577,7 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
             args.task,
         )
     set_seed(args.seed)
+    _require_build_workers(args, sample_dataset)
 
     if sample_dataset is None:
         base_dataset = _build_base_dataset(args)
@@ -548,13 +634,15 @@ def run(args: argparse.Namespace, sample_dataset: Any = None) -> Path:
     # suffixes they would collide with the full run.
     dev_suffix = f"_dev{args.dev}" if args.dev else ""
     window_suffix = _window_suffix(args.observation_window_hours)
+    drop = getattr(args, "drop_modality", None) or []
+    drop_suffix = "".join(f"_no{m}" for m in sorted(drop))
     # The flag marks the config, not the outcome: a run that splits
     # cleanly by patient keeps the suffix, so the opt-in stays visible
     # in the directory name.
     leaky_suffix = "_allow_leaky" if args.allow_leaky_split else ""
     exp_name = (
         f"{args.task}_{args.model}_seed{args.seed}"
-        f"{dev_suffix}{window_suffix}{leaky_suffix}"
+        f"{dev_suffix}{window_suffix}{drop_suffix}{leaky_suffix}"
     )
     output_dir = Path(args.output_dir)
 
@@ -763,7 +851,18 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         default=1,
         help="Gradient accumulation steps (default 1, no accumulation).",
     )
-    parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help=(
+            "Dask build workers and loader workers. Below 1 is refused "
+            "when the runner builds the dataset itself (a zero-worker "
+            "build hangs or divides by zero; a negative count dies "
+            "inside loader construction); a prebuilt sample dataset may "
+            "still load with 0."
+        ),
+    )
     parser.add_argument(
         "--no-dask-distributed",
         dest="use_dask_distributed",
@@ -809,9 +908,11 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         const=1000,
         default=0,
         help=(
-            "Dev mode: limit dataset to N patients for fast iteration. "
-            "--dev (no value) defaults to 1000 patients. "
-            "--dev 5000 limits to 5000. Omit for full dataset."
+            "Dev mode: cap the cohort at 1000 patients for fast iteration "
+            "(bare --dev means 1000). Only 0 (off, full dataset) and 1000 "
+            "are accepted: the dataset treats dev as a flag and always "
+            "caps at 1000, so any other value would silently behave as "
+            "1000. Omit for the full dataset."
         ),
     )
     parser.add_argument(
@@ -821,6 +922,23 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         help=(
             "Hours from each admission to collect labs/radiology notes. "
             "Default 0 means no cap: full stay through discharge."
+        ),
+    )
+    parser.add_argument(
+        "--drop-modality",
+        action="append",
+        choices=["labs", "notes"],
+        default=None,
+        help=(
+            "Drop a modality's input fields at the model stage; repeat for "
+            "both (but dropping everything is refused). labs removes labs "
+            "and labs_mask, notes removes admission_note_times. Same task, "
+            "same samples, same split, same seed: the cohort keeps every "
+            "patient, and a patient with nothing left in the remaining "
+            "modality stays as an empty sequence. Cohort selection, time "
+            "origin, and splits are unchanged -- the task still reads every "
+            "table -- so dropping notes still needs --note-root for --task "
+            "notes_labs, and discharge timing still bounds the windows."
         ),
     )
     parser.add_argument(
@@ -925,6 +1043,25 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         )
     if args.amp_dtype is None:
         args.amp_dtype = "bf16"
+
+    # The dataset treats dev as a flag and hardcodes the 1000-patient cap,
+    # so any other value would silently behave as --dev 1000. Refuse
+    # rather than mislead; the dataset itself is left alone.
+    if args.dev not in (0, 1000):
+        parser.error(
+            f"--dev {args.dev} is not supported. Only 0 (off, full "
+            "dataset) and 1000 are accepted: the dataset caps at 1000 "
+            "patients whatever positive value it gets, so any other value "
+            "would silently behave as --dev 1000."
+        )
+
+    # A modality ablation must keep at least one input modality and may
+    # only drop fields the task has. Checked here so a bad combination
+    # fails before any dataset build.
+    try:
+        _check_drop_modality(args)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     return args
 

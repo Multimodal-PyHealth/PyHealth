@@ -70,6 +70,108 @@ class TestUnifiedE2ERunner(unittest.TestCase):
         )
         self.assertFalse(args.cache_frozen_text)
 
+    def test_num_workers_zero_refused_when_building(self):
+        # Tests the guard directly (not via run(), which would hang in the
+        # zero-worker Dask cluster without the fix). Fails without the fix
+        # because _require_build_workers does not exist.
+        runner = _runner()
+        for bad in ("0", "-1"):
+            args = runner.parse_args(
+                ["--ehr-root", "/tmp/does-not-exist",
+                 "--num-workers", bad]
+            )
+            with self.assertRaisesRegex(
+                RuntimeError, f"--num-workers {bad}"
+            ):
+                runner._require_build_workers(args, sample_dataset=None)
+        # A prebuilt dataset may still load with 0 (main-process loading).
+        runner._require_build_workers(args, sample_dataset=object())
+        # nonzero workers always pass, with or without a prebuilt dataset.
+        args = runner.parse_args(["--ehr-root", "/tmp/does-not-exist"])
+        runner._require_build_workers(args, sample_dataset=None)
+
+    def test_drop_modality_refusals(self):
+        # Fails without the fix: every one of these used to parse.
+        runner = _runner()
+        base = ["--ehr-root", "/tmp/does-not-exist"]
+        # Duplicates refused.
+        with self.assertRaises(SystemExit):
+            runner.parse_args(
+                base + ["--task", "notes_labs", "--drop-modality", "notes",
+                        "--drop-modality", "notes"]
+            )
+        # Dropping everything refused (both orders, both tasks).
+        with self.assertRaises(SystemExit):
+            runner.parse_args(
+                base + ["--task", "notes_labs", "--drop-modality", "labs",
+                        "--drop-modality", "notes"]
+            )
+        with self.assertRaises(SystemExit):
+            runner.parse_args(
+                base + ["--task", "labs", "--drop-modality", "labs"]
+            )
+        # The labs task has no note fields to drop.
+        with self.assertRaises(SystemExit):
+            runner.parse_args(
+                base + ["--task", "labs", "--drop-modality", "notes"]
+            )
+        # Unknown values rejected by argparse choices.
+        with self.assertRaises(SystemExit):
+            runner.parse_args(
+                base + ["--task", "notes_labs", "--drop-modality", "image"]
+            )
+        # Each single drop parses on notes_labs.
+        for modality in ("labs", "notes"):
+            args = runner.parse_args(
+                base + ["--task", "notes_labs", "--drop-modality", modality]
+            )
+            self.assertEqual(args.drop_modality, [modality])
+        args = runner.parse_args(base + ["--task", "labs"])
+        self.assertIsNone(args.drop_modality)
+
+    def test_drop_modality_filters_task_schema(self):
+        # No dataset needed: only the task's input schema is filtered.
+        runner = _runner()
+        args = runner.parse_args(
+            ["--ehr-root", "/tmp/does-not-exist", "--task", "notes_labs",
+             "--drop-modality", "notes"]
+        )
+        self.assertEqual(
+            sorted(runner._build_task(args).input_schema), ["labs", "labs_mask"]
+        )
+        args = runner.parse_args(
+            ["--ehr-root", "/tmp/does-not-exist", "--task", "notes_labs",
+             "--drop-modality", "labs"]
+        )
+        self.assertEqual(
+            sorted(runner._build_task(args).input_schema),
+            ["admission_note_times"],
+        )
+        args = runner.parse_args(
+            ["--ehr-root", "/tmp/does-not-exist", "--task", "notes_labs"]
+        )
+        self.assertEqual(
+            sorted(runner._build_task(args).input_schema),
+            ["admission_note_times", "labs", "labs_mask"],
+        )
+
+    def test_dev_other_values_refused(self):
+        # Fails without the fix: --dev 5000 used to parse and then behave
+        # as --dev 1000.
+        runner = _runner()
+        for bad in ("5000", "2000", "100", "1"):
+            with self.assertRaises(SystemExit, msg=bad):
+                runner.parse_args(
+                    ["--ehr-root", "/tmp/does-not-exist", "--dev", bad]
+                )
+        args = runner.parse_args(["--ehr-root", "/tmp/does-not-exist"])
+        self.assertEqual(args.dev, 0)
+        for good, want in ((["0"], 0), (["1000"], 1000), ([], 1000)):
+            args = runner.parse_args(
+                ["--ehr-root", "/tmp/does-not-exist", "--dev", *good]
+            )
+            self.assertEqual(args.dev, want)
+
     def test_synthetic_end_to_end(self):
         from pyhealth.datasets import create_sample_dataset
 
