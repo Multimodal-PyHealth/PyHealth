@@ -9,11 +9,11 @@ from typing import Any, Dict, List, Optional, Tuple
 import litdata
 import torch
 from dateutil.parser import parse as dateutil_parse
-from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import DataLoader
 
 from pyhealth import BASE_CACHE_PATH
 from pyhealth.utils import create_directory
+from pyhealth.datasets.collate import _event_pad_mask, _pad_stack, _stack_positions
 
 MODULE_CACHE_PATH = os.path.join(BASE_CACHE_PATH, "datasets")
 create_directory(MODULE_CACHE_PATH)
@@ -240,6 +240,9 @@ def _restore_from_cache(sample: Dict[str, Any]) -> Dict[str, Any]:
     return restored
 
 
+PAD_MASK_SUFFIX = "__pad_mask"
+
+
 def collate_fn_dict(batch: List[dict]) -> dict:
     """Collates a batch of data into a dictionary of lists.
 
@@ -286,39 +289,19 @@ def collate_fn_dict_with_padding(
 
         if collators is not None and key in collators:
             collated[key] = collators[key](values)
-        # Check if this is a temporal feature tuple (time, values)
+            # A collator that sets emits_pad_mask (see TupleTimeTextProcessor)
+            # also gets the event mask of its batch.
+            owner = getattr(collators[key], "__self__", None)
+            if getattr(owner, "emits_pad_mask", False):
+                mask = _event_pad_mask(values)
+                if mask is not None:
+                    collated[f"{key}{PAD_MASK_SUFFIX}"] = mask
+        # Check if this is a temporal feature tuple: (time, values)
         elif isinstance(values[0], tuple) and len(values[0]) == 2:
-            # Handle (time, values) tuples from processors
-            time_tensors = [v[0] for v in values]
-            value_tensors = [v[1] for v in values]
-
-            # Collate values
-            if value_tensors[0].dim() == 0:
-                # Scalars
-                collated_values = torch.stack(value_tensors)
-            elif all(v.shape == value_tensors[0].shape for v in value_tensors):
-                # All same shape
-                collated_values = torch.stack(value_tensors)
-            else:
-                # Variable shapes, use pad_sequence
-                collated_values = pad_sequence(
-                    value_tensors, batch_first=True, padding_value=0
-                )
-
-            # Collate times (if present)
-            collated_times = None
-            # Check if ALL samples have time (not just some)
-            if all(t is not None for t in time_tensors):
-                time_tensors_all = [t for t in time_tensors if t is not None]
-                if all(t.shape == time_tensors_all[0].shape for t in time_tensors_all):
-                    collated_times = torch.stack(time_tensors_all)
-                else:
-                    collated_times = pad_sequence(
-                        time_tensors_all, batch_first=True, padding_value=0
-                    )
-
-            # Return as tuple (time, values)
-            collated[key] = (collated_times, collated_values)
+            collated[key] = _stack_positions(values)
+            mask = _event_pad_mask(values)
+            if mask is not None:
+                collated[f"{key}{PAD_MASK_SUFFIX}"] = mask
             # PyG Data objects (graph processor output)
         elif HAS_PYG and isinstance(values[0], PyGData):
             collated[key] = PyGBatch.from_data_list(values)
@@ -335,9 +318,7 @@ def collate_fn_dict_with_padding(
                     # Scalars, treat as stackable
                     collated[key] = torch.stack(values)
                 elif values[0].dim() >= 1:
-                    collated[key] = pad_sequence(
-                        values, batch_first=True, padding_value=0
-                    )
+                    collated[key] = _pad_stack(values)
                 else:
                     raise ValueError(f"Unsupported tensor shape: {values[0].shape}")
         else:

@@ -3,6 +3,7 @@ import torch
 import logging
 from .base_processor import FeatureProcessor, ModalityType, TemporalFeatureProcessor
 from . import register_processor
+from pyhealth.datasets.collate import _stack_positions
 
 logger = logging.getLogger(__name__)
 
@@ -15,24 +16,34 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
     
     If `tokenizer_model` is provided, the text will be tokenized using a HuggingFace
     AutoTokenizer, and the output will differ from the raw text version.
+
+    Example:
+        >>> proc = TupleTimeTextProcessor()
+        >>> texts, times, tag = proc.process((["note one"], [0.0]))
+        >>> tag
+        'note'
     """
-    
+
+    # Batches of this processor's field also get {field}__pad_mask.
+    emits_pad_mask = True
+
     def __init__(
         self, 
         type_tag: str = "note",
         tokenizer_model: Optional[str] = None,
-        max_length: int = 128,
+        max_length: int = 512,
         padding: bool = True,
         truncation: bool = True,
     ):
         """Initialize the processor.
-        
+
         Args:
             type_tag: Modality identifier for automatic routing. Default: "note"
             tokenizer_model: Name or path of the HuggingFace tokenizer to use.
                 If None, texts are returned as raw strings. Default: None
-            max_length: Maximum sequence length for tokenization. Default: 128
-            padding: Whether to pad sequences to max_length. Default: True
+            max_length: Maximum sequence length for tokenization. Default: 512
+            padding: Whether to pad sequences to the longest note in the sample.
+                Default: True
             truncation: Whether to truncate sequences to max_length. Default: True
         """
         super().__init__()
@@ -81,28 +92,65 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
                     - str: Type tag
         """
         texts, time_diffs = value
+        texts = list(texts or [])
+        time_diffs = list(time_diffs or [])
+
+        # Keep text/time aligned and filter malformed text entries.
+        pair_count = min(len(texts), len(time_diffs))
+        cleaned_texts: list[str] = []
+        cleaned_times: list[float] = []
+        for i in range(pair_count):
+            raw_text = texts[i]
+            raw_time = time_diffs[i]
+
+            # Normalize text; skip null/whitespace-only entries.
+            if raw_text is None:
+                continue
+            text = str(raw_text).strip()
+            if text == "":
+                continue
+
+            # Best-effort float normalization; skip unparseable timestamps.
+            try:
+                t = float(raw_time)
+            except (TypeError, ValueError):
+                continue
+
+            cleaned_texts.append(text)
+            cleaned_times.append(t)
+
+        texts = cleaned_texts
+        time_diffs = cleaned_times
         time_tensor = torch.tensor(time_diffs, dtype=torch.float32)
 
         if self.tokenizer is not None:
-            # Tokenize the list of texts
+            # Fast tokenizers crash on tokenizer([]). Build empty tensors
+            # ourselves so a patient with no notes is zero events, not a
+            # fake "[MISSING_TEXT]" row whose BERT embedding is a constant
+            # the classifier can use as a mortality feature.
+            if len(texts) == 0:
+                empty = torch.zeros((0, 1), dtype=torch.long)
+                return empty, empty.clone(), empty.clone(), time_tensor, self.type_tag
             encoded = self.tokenizer(
                 texts,
-                padding="max_length" if self.padding else False,
+                padding="longest" if self.padding else False,
                 truncation=self.truncation,
                 max_length=self.max_length,
                 return_tensors="pt"
             )
-            
-            input_ids = encoded["input_ids"]
-            attention_mask = encoded["attention_mask"]
-            
+
+            input_ids = encoded.get("input_ids")
+            if input_ids is None:
+                raise ValueError("Tokenizer output is missing required `input_ids`.")
+
+            attention_mask = encoded.get("attention_mask")
+            if attention_mask is None:
+                attention_mask = torch.ones_like(input_ids)
+
             # Not all tokenizers return token_type_ids (e.g. RoBERTa might not, BERT does)
-            if "token_type_ids" in encoded:
-                token_type_ids = encoded["token_type_ids"]
-            else:
-                # meaningful text usually 0, padding 0? BERT uses 0 for sent A. 
-                # If not provided, we can just use zeros or omit. 
-                # For consistency with schema, let's provide zeros if expected.
+            token_type_ids = encoded.get("token_type_ids")
+            if token_type_ids is None:
+                # Some tokenizers do not return token_type_ids.
                 token_type_ids = torch.zeros_like(input_ids)
 
             return input_ids, attention_mask, token_type_ids, time_tensor, self.type_tag
@@ -168,6 +216,24 @@ class TupleTimeTextProcessor(TemporalFeatureProcessor):
             "mask":  result[1],  # attention_mask (N, L)
             "time":  result[3],  # time tensor (N,)
         }
+
+    def collate(self, values: list[tuple]) -> tuple:
+        """Collates a batch of processed tuples, one tuple position at a time.
+
+        Ragged note counts and note lengths pad to the batch maximum, and the
+        type tag stays a list. ``get_dataloader`` batches the field with this
+        method and adds the ``{field}__pad_mask`` event mask for the batch.
+
+        Examples:
+            >>> import torch
+            >>> proc = TupleTimeTextProcessor()
+            >>> batch = [(torch.ones(2, 3), torch.ones(2), "note"),
+            ...          (torch.ones(1, 3), torch.ones(1), "note")]
+            >>> value, time, tag = proc.collate(batch)
+            >>> value.shape, time.shape, tag
+            (torch.Size([2, 2, 3]), torch.Size([2, 2]), ['note', 'note'])
+        """
+        return _stack_positions(values)
 
     def __repr__(self):
         if self.tokenizer_model:
