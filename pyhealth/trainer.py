@@ -521,6 +521,8 @@ class Trainer:
                             )
                             break
 
+        self.best_score = best_score
+
         # load best model
         if load_best_model_at_last and self.exp_path is not None and os.path.isfile(
             os.path.join(self.exp_path, "best.ckpt")):

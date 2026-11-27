@@ -482,20 +482,26 @@ class UnifiedMultimodalEmbeddingModel(nn.Module):
 
     @property
     def frozen_text_cache_stats(self) -> dict[str, int]:
-        """Cache ``hits``, ``misses``, and ``size`` for the A/B timing run.
+        """Cache ``hits``, ``misses``, ``size``, and ``bytes`` for the A/B run.
 
         Misses count rows not cached before this forward (including
         duplicates and overflow rows served from the current forward);
-        hits count rows served from the cache.
+        hits count rows served from the cache. ``bytes`` is the tensor
+        storage of the cached vectors (0 when the cache is empty).
 
         Example:
             >>> sorted(model.frozen_text_cache_stats)
-            ['hits', 'misses', 'size']
+            ['bytes', 'hits', 'misses', 'size']
         """
         return {
             "hits": self._frozen_text_cache_hits,
             "misses": self._frozen_text_cache_misses,
             "size": self.frozen_text_cache_size,
+            "bytes": sum(
+                v.element_size() * v.nelement()
+                for c in self._frozen_text_cache.values()
+                for v in c.values()
+            ),
         }
 
     def reset_frozen_text_cache_stats(self) -> None:
