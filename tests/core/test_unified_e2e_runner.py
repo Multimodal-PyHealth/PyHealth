@@ -140,6 +140,9 @@ _EXPECTED_METRICS_KEYS = (
     "config",
     "split",
     "epoch_train_seconds",
+    "epoch_train_cpu_seconds",
+    "train_cpu_seconds",
+    "train_cpu_util_pct",
     "eval_seconds",
     "inference_seconds",
     "frozen_text_cache",
@@ -191,11 +194,34 @@ def _assert_demo_metrics(testcase, output_csv):
     testcase.assertTrue(Path(output_csv).is_file())
     metrics_path = Path(output_csv).parent / "metrics.json"
     testcase.assertTrue(metrics_path.is_file())
+    run_config_path = Path(output_csv).parent / "run_config.json"
+    testcase.assertTrue(run_config_path.is_file())
+    run_config = json.loads(run_config_path.read_text())
+    testcase.assertEqual(
+        set(run_config), {"config", "git", "source_sha256", "torch"}
+    )
+    test_metrics_path = Path(output_csv).parent / "test_metrics.json"
+    testcase.assertTrue(test_metrics_path.is_file())
+    test_metrics = json.loads(test_metrics_path.read_text())
+    testcase.assertEqual(
+        test_metrics["eval_split"],
+        run_config["config"]["eval_split"],
+    )
     metrics = json.loads(metrics_path.read_text())
     testcase.assertEqual(set(metrics.keys()), set(_EXPECTED_METRICS_KEYS))
     testcase.assertEqual(len(metrics["epoch_train_seconds"]), 1)
     for v in metrics["epoch_train_seconds"]:
         testcase.assertTrue(torch.isfinite(torch.tensor(float(v))).item())
+    testcase.assertEqual(
+        len(metrics["epoch_train_cpu_seconds"]),
+        len(metrics["epoch_train_seconds"]),
+    )
+    for v in metrics["epoch_train_cpu_seconds"]:
+        testcase.assertTrue(torch.isfinite(torch.tensor(float(v))).item())
+    for key in ("train_cpu_seconds", "train_cpu_util_pct"):
+        testcase.assertTrue(
+            torch.isfinite(torch.tensor(float(metrics[key]))).item()
+        )
     testcase.assertTrue(
         torch.isfinite(torch.tensor(float(metrics["eval_seconds"]))).item()
     )
